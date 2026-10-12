@@ -47,13 +47,23 @@ Everything is built locally, and nothing derived from the game is uploaded
 anywhere. Generated game code and the finished apps stay under the ignored
 `local/` directory and are for your personal use only.
 
-**1. Prepare the game code.** The ROM is recompiled to C once, privately. This is
-currently a manual, multi-step workflow rather than a single command: check out
-N64Recomp and N64ModernRuntime at the revisions pinned in
-[toolchain-sources](docs/toolchain-sources.md) into `third_party/`, then follow
-[the recompilation tools](tools/recompile/README.md) and the
-[native runtime guide](docs/native-runtime.md). Output goes to
-`local/generated/game`.
+**1. Prepare the game code.** The ROM is recompiled to C once, privately, with one
+command:
+
+```sh
+make recompile ROM="/path/to/your.z64"   # writes local/generated/game
+```
+
+It patches and builds N64Recomp, analyzes the ROM, adds the UI observers, generates
+the C code and validates it, so the result is ready for `make build`. The ROM must
+be in `z64` (big-endian) byte order. Before the first run, check out N64Recomp and
+N64ModernRuntime at the revisions pinned in
+[toolchain-sources](docs/toolchain-sources.md) into `third_party/`, create the
+project `.venv` with the pinned splat/spimdisasm, and prepare the libultra
+inventory once ([libultra inventory](docs/libultra-inventory.md)); the command
+verifies the inventory but does not build it. The individual steps are described
+in [the recompilation tools](tools/recompile/README.md) and the
+[native runtime guide](docs/native-runtime.md).
 
 **2. Build and start the desktop app (macOS).**
 
