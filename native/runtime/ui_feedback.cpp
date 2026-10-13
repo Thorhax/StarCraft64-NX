@@ -5,6 +5,8 @@
 #include <algorithm>
 #include <mutex>
 #include <atomic>
+#include <bit>
+#include <cmath>
 
 namespace {
 namespace guest = sc64::runtime::guest;
@@ -38,6 +40,10 @@ unsigned byte(const std::uint8_t* ram, std::uint32_t a) { return ram[(a & 0x7fff
 int half(const std::uint8_t* ram, std::uint32_t a) {
     return std::int16_t((byte(ram,a)<<8)|byte(ram,a+1));
 }
+std::atomic<std::uint64_t> cursor_warp{0};
+void set_byte(std::uint8_t* ram, std::uint32_t a, unsigned v) { ram[(a & 0x7fffff) ^ 3] = std::uint8_t(v); }
+void set_half(std::uint8_t* ram, std::uint32_t a, int v) { set_byte(ram,a,unsigned(v)>>8); set_byte(ram,a+1,unsigned(v)); }
+void set_word(std::uint8_t* ram, std::uint32_t a, std::uint32_t v) { set_half(ram,a,int(v>>16)); set_half(ram,a+2,int(v&0xffff)); }
 std::uint32_t hint_pixels(const std::uint8_t* ram, std::uint32_t pixels,
                           const sc64::runtime::UiItem& item) {
     constexpr unsigned stride=136, height=60; // guarded 1P canvas in 80007B50
@@ -55,8 +61,25 @@ sc64::runtime::MinimapInbox& sc64::runtime::minimap_input() {
     return inbox;
 }
 void sc64::runtime::set_minimap_handler(MinimapHandler handler) { minimap_handler=handler; }
+void sc64::runtime::request_cursor_warp(double x, double y) {
+    if (!(x >= 0 && x < 320 && y >= 0 && y < 240)) return;
+    const auto gx = std::min<std::uint64_t>(std::uint64_t(std::lround(x * 2)), 639);
+    const auto gy = std::min<std::uint64_t>(std::uint64_t(std::lround(y * 2)), 479);
+    cursor_warp = (1ull << 32) | (gx << 16) | gy;
+}
 
 extern "C" void sc64_ui_pick(std::uint8_t* ram, recomp_context* ctx, unsigned kind) {
+    // Touch warp: same validity checks as the cursor snapshot reader, 640x480 floats + s16 mirrors.
+    if (kind==0) if (const auto w=cursor_warp.exchange(0)) {
+        const float cx=std::bit_cast<float>(word(ram,0x800afdbc)), cy=std::bit_cast<float>(word(ram,0x800afdc4));
+        if (half(ram,guest::game_mode)==3 && !byte(ram,guest::split_screen) && std::isfinite(cx) && std::isfinite(cy)
+            && std::abs(cx-half(ram,0x800afdcc))<=1 && std::abs(cy-half(ram,0x800afdce))<=1) {
+            const float x=float((w>>16)&0xffff), y=float(w&0xffff);
+            set_word(ram,0x800afdbc,std::bit_cast<std::uint32_t>(x));
+            set_word(ram,0x800afdc4,std::bit_cast<std::uint32_t>(y));
+            set_half(ram,0x800afdcc,int(x)); set_half(ram,0x800afdce,int(y));
+        }
+    }
     if (kind==0) if (auto handler=minimap_handler.load()) {
         if (auto target=sc64::runtime::minimap_input().take(sc64::runtime::read_minimap({ram,0x800000},3)))
             handler(ram,ctx,*target);

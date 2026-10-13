@@ -10,6 +10,13 @@
 #include <aaudio/AAudio.h>
 #endif
 #include <miniaudio.h>
+#if defined(__SWITCH__)
+#include <switch.h>
+#include <cstdlib>
+#include <cstring>
+#include <span>
+#include <thread>
+#endif
 #include "log.hpp"
 #include <algorithm>
 #include <array>
@@ -145,6 +152,41 @@ void callback(ma_device* sink, void* output, const void*, ma_uint32 frames) {
     }
     callback_work.record(monotonic_ns() - begin);
 }
+#if defined(__SWITCH__)
+// Switch output: libnx audout, 48 kHz stereo s16, three 1024-frame buffers
+// (~64 ms queued). The thread refills each released buffer with the same mix
+// the miniaudio callback uses elsewhere.
+constexpr unsigned switch_frames = 1024, switch_buffers = 3;
+std::thread switch_thread;
+std::atomic<bool> switch_running{false};
+void switch_loop() {
+    svcSetThreadPriority(CUR_THREAD_HANDLE, 0x2A); // ahead of the shell (0x2C) and raster helpers
+    constexpr std::size_t bytes = switch_frames * 2 * sizeof(std::int16_t); // 4096 = audout's 0x1000 alignment
+    std::array<AudioOutBuffer, switch_buffers> buffers{};
+    std::array<void*, switch_buffers> memory{};
+    for (unsigned i = 0; i < switch_buffers; ++i) {
+        memory[i] = std::aligned_alloc(0x1000, bytes);
+        std::memset(memory[i], 0, bytes);
+        buffers[i].buffer = memory[i];
+        buffers[i].buffer_size = bytes;
+        buffers[i].data_size = bytes;
+        audoutAppendAudioOutBuffer(&buffers[i]);
+    }
+    while (switch_running.load()) {
+        AudioOutBuffer* released = nullptr;
+        u32 count = 0;
+        if (R_FAILED(audoutWaitPlayFinish(&released, &count, 100'000'000ULL)) || !released) continue;
+        const auto begin = monotonic_ns();
+        callback_intervals.observe(begin, timing_epoch.load(std::memory_order_relaxed));
+        render_pcm16(std::span<std::int16_t>(static_cast<std::int16_t*>(released->buffer), switch_frames * 2), mix);
+        armDCacheFlush(released->buffer, bytes);
+        callback_work.record(monotonic_ns() - begin);
+        audoutAppendAudioOutBuffer(released);
+    }
+    audoutStopAudioOut();
+    for (void* block : memory) std::free(block);
+}
+#endif
 }
 Timing take_timing() {
     return {source_intervals.take_ms(), callback_intervals.take_ms(), callback_work.take_ms(),
@@ -159,6 +201,9 @@ void configure(const char* requested) {
     compatibility_output=name=="compatibility";
 }
 const char* backend() {
+#if defined(__SWITCH__)
+    if (initialized) return "audout";
+#endif
     const auto value=active_backend.load();
     return value<0 ? "none" : ma_get_backend_name(static_cast<ma_backend>(value));
 }
@@ -178,6 +223,17 @@ void trace(const std::filesystem::path& output, std::uint64_t from, std::uint64_
 }
 void initialize() {
     if (initialized) return;
+#if defined(__SWITCH__)
+    if (R_FAILED(audoutInitialize())) throw std::runtime_error("audout initialization failed");
+    if (R_FAILED(audoutStartAudioOut())) { audoutExit(); throw std::runtime_error("audout start failed"); }
+    device_xruns = -1;
+    device_buffer_frames = int(switch_frames * switch_buffers);
+    switch_running = true;
+    switch_thread = std::thread(switch_loop);
+    initialized = true;
+    sc64::shell::log::info("audout: %u Hz stereo s16, %u x %u frames", audoutGetSampleRate(), switch_buffers, switch_frames);
+    return;
+#endif
     auto config = ma_device_config_init(ma_device_type_playback);
     config.playback.format = ma_format_f32;
     config.playback.channels = 2;
@@ -228,7 +284,15 @@ void initialize() {
         device.playback.internalPeriodSizeInFrames,device.playback.internalPeriods);
 }
 void shutdown() {
+#if defined(__SWITCH__)
+    if (initialized) {
+        switch_running = false;
+        if (switch_thread.joinable()) switch_thread.join();
+        audoutExit();
+    }
+#else
     if (initialized) ma_device_uninit(&device);
+#endif
     initialized = false;
     active_backend=-1;
     try { export_trace(); }

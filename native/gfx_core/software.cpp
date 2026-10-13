@@ -1,6 +1,8 @@
 #include "gfx.hpp"
 #include <algorithm>
+#include <atomic>
 #include <climits>
+#include <cstdio>
 #include <exception>
 #include <stdexcept>
 #include <tuple>
@@ -164,11 +166,32 @@ RasterPool::~RasterPool() {
     wake_.notify_all();
     for(auto& thread:threads_)thread.join();
 }
+#if defined(__SWITCH__)
+extern "C" std::uint32_t svcSetThreadCoreMask(std::uint32_t handle, std::int32_t core, std::uint32_t mask);
+#endif
 unsigned RasterPool::default_helpers() {
+#if defined(__SWITCH__)
+    // hardware_concurrency() is 0 on libnx. The submitting guest thread (core 1)
+    // rasterizes too. Helper 0 on core 0 (shell), helper 1 on core 3 when the
+    // launch grants it (4-core forwarder), helper 2 on core 2 (Gfx/SP thread,
+    // mostly idle). Helpers keep libnx's lowest priority, so they only take
+    // otherwise idle time on shared cores.
+    return 3;
+#else
     const unsigned cores=std::thread::hardware_concurrency();
     return cores>2?std::min(3u,cores-2):0;
+#endif
 }
 void RasterPool::work() {
+#if defined(__SWITCH__)
+    static std::atomic<unsigned> slots{0};
+    const unsigned slot=slots.fetch_add(1);
+    int core=slot==2?2:0;
+    if(slot==1 && svcSetThreadCoreMask(0xFFFF8000u,3,1u<<3)==0)core=3;
+    else svcSetThreadCoreMask(0xFFFF8000u,core,1u<<core);
+    std::printf("SC64 raster helper %u on core %d\n",slot,core);
+    std::fflush(stdout);
+#endif
     std::uint64_t seen=0;
     for(;;) {
         const std::function<void(unsigned)>* job=nullptr;unsigned count=0;

@@ -23,6 +23,9 @@ struct ServoTuning {
     double arrival_margin = 2;
 };
 extern ServoTuning servo; // ADR-066 constants; mutable for focused fixtures.
+// Optional host hook: place the cursor directly on a touch target (image units).
+// Unset (fixtures) keeps the original stick steering.
+extern void (*warp_cursor)(double x, double y);
 void clear(GestureState& s);
 bool set_target(GestureState& s, double x, double y, bool touch = false);
 bool enqueue(GestureState& s, double x, double y, unsigned buttons = 0, bool hold = false, bool auto_pick = false);

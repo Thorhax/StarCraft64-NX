@@ -28,7 +28,7 @@ TARGET_API = 36
 # Above every installed build of the former engine package (versionCode 1).
 VERSION_CODE = 2
 VERSION_NAME = '2.0'
-JDK = Path('/opt/homebrew/opt/openjdk@21')
+JDK = Path('/usr/lib/jvm/java-21-openjdk-amd64')
 RUNTIME = ROOT / 'local/deps/N64ModernRuntime-shell'
 SDL_JAVA = bootstrap.SDL_DIR / 'android-project/app/src/main/java'
 # Vulkan is the packaged default (verified on the physical phone). SDL 3.4.18's
@@ -99,7 +99,7 @@ def main() -> None:
     ndk = android_sdk / 'ndk' / SDK_REVISION
     if f'Pkg.Revision = {SDK_REVISION}' not in (ndk / 'source.properties').read_text():
         raise ValueError('NDK pin mismatch')
-    ndk_bin = ndk / 'toolchains/llvm/prebuilt/darwin-x86_64/bin'
+    ndk_bin = ndk / 'toolchains/llvm/prebuilt/linux-x86_64/bin'
     build_tools = android_sdk / 'build-tools' / BUILD_TOOLS
     android_jar = android_sdk / f'platforms/android-{TARGET_API}/android.jar'
     bootstrap.main()
@@ -108,6 +108,8 @@ def main() -> None:
     run(['cmake', '-S', ROOT / 'native/android', '-B', build, '-G', 'Ninja',
          f'-DCMAKE_TOOLCHAIN_FILE={ndk}/build/cmake/android.toolchain.cmake',
          '-DANDROID_ABI=arm64-v8a', f'-DANDROID_PLATFORM=android-{API}', '-DANDROID_STL=c++_static',
+         '-DCMAKE_CXX_SCAN_FOR_MODULES=OFF',
+         '-DCMAKE_CXX_SCAN_FOR_MODULES=OFF',
          f'-DCMAKE_BUILD_TYPE={args.build_type}'])
     if args.configure_only: return
     run(['cmake', '--build', build, '--target', 'sc64_app', '-j', str(args.jobs)])

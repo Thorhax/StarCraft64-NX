@@ -75,6 +75,12 @@ void atomic_write(const std::filesystem::path& path, std::span<const std::uint8_
         throw std::system_error(GetLastError(), std::system_category(), "publish FlashRAM save");
     }
 #else
+#if defined(__SWITCH__)
+    // libnx's SD-card rename does not replace an existing file; drop the old
+    // image first (the verified temporary still holds the new one until renamed).
+    std::error_code replace_error;
+    std::filesystem::remove(path, replace_error);
+#endif
     if (::rename(temporary.c_str(), path.c_str()) != 0) {
         throw std::system_error(errno, std::generic_category(), "publish FlashRAM save");
     }
@@ -83,7 +89,8 @@ void atomic_write(const std::filesystem::path& path, std::span<const std::uint8_
 // POSIX persists a rename only once its directory entry is synchronized.
 // MoveFileEx(MOVEFILE_WRITE_THROUGH) already covers this on Windows.
 void sync_parent_directory([[maybe_unused]] const std::filesystem::path& path) {
-#ifndef _WIN32
+    // Switch: directories cannot be open()ed on libnx fsdev; the file itself was synced.
+#if !defined(_WIN32) && !defined(__SWITCH__)
     const auto parent = path.has_parent_path() ? path.parent_path() : std::filesystem::path(".");
     const int directory = ::open(parent.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     if (directory < 0) throw std::system_error(errno, std::generic_category(), "open FlashRAM save directory");

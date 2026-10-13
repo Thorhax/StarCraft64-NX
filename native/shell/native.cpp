@@ -25,6 +25,7 @@ std::uint64_t config_integer(const Config& config, const char* key) {
 Native::Native(const Config& config, Window window) : config_(config), window_(std::move(window)) {}
 
 void Native::initialize() {
+    input::warp_cursor = [](double x, double y) { runtime::request_cursor_warp(x, y); };
     storage_ = config_.string("sc64.storage");
     if (storage_.empty()) storage_ = sc64_storage_path();
     sc64_platform_initialize(storage_);

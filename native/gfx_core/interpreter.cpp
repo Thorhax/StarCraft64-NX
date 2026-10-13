@@ -7,6 +7,22 @@
 namespace sc64::gfx {
 namespace {
 enum class ImageAddresses { Physical, Segmented };
+// Decoded S2DEX backgrounds reused across frames. An entry is reused only when
+// every decode input is byte-identical (source image bytes, TLUT/TMEM bytes for
+// CI, geometry, palette and TLUT mode), so the pixels and their content key are
+// exactly what a fresh decode would produce. Menus redraw 640x480 backgrounds
+// every frame; decoding and hashing them per texel dominated menu frame time.
+struct BackgroundCacheEntry {
+    Image image; unsigned height = 0, palette = 0, mode = 0;
+    std::vector<std::uint8_t> source;
+    std::array<std::uint8_t,4096> tmem{};
+    std::vector<Color> pixels;
+    std::uint64_t key = 0;
+};
+std::vector<BackgroundCacheEntry>& background_cache() {
+    thread_local std::vector<BackgroundCacheEntry> cache;
+    return cache;
+}
 class Interpreter {
 public:
     DrawList out;
@@ -18,6 +34,7 @@ public:
     unsigned pc=0;
     ImageAddresses image_addresses;
     std::function<void()> checkpoint;
+    std::uint64_t texture_bytes=0;
     Interpreter(std::span<const std::uint8_t> ram,ImageAddresses addresses,
                 const std::function<void()>& poll = {}):image_addresses(addresses),checkpoint(poll) {
         if(ram.size()!=0x800000)throw std::runtime_error("Expected canonical 8 MiB RDRAM");
@@ -70,6 +87,15 @@ public:
     }
     static Color color(unsigned v) {return {int(v>>24),int(v>>16&255),int(v>>8&255),int(v&255)};}
     unsigned store(Texture tex) {
+        tex.key=texture_key(tex);
+        return insert(std::move(tex));
+    }
+    // Same as store() for a texture whose key is already known exactly.
+    unsigned store_known(Texture tex,std::uint64_t key) {
+        tex.key=key;
+        return insert(std::move(tex));
+    }
+    std::uint64_t texture_key(const Texture& tex) const {
         // FNV identifies candidates only. Equal keys are checked against the full
         // semantic payload, so a collision cannot alias a different resource.
         std::uint64_t hash=14695981039346656037ull;
@@ -96,7 +122,10 @@ public:
             // components are 0..255; callers cannot supply arbitrary Colors.
             auto c=tex.pixels[i];for(int v:{c.r,c.g,c.b,c.a})add_byte(std::uint8_t(v));
         }
-        tex.key=hash;
+        return hash;
+    }
+    unsigned insert(Texture tex) {
+        const std::uint64_t hash=tex.key;
         for(unsigned i=0;i<out.textures.size();++i)if(out.textures[i].key==hash) {
             const auto& old=out.textures[i];
             if(old.tile==tex.tile && old.width==tex.width && old.height==tex.height &&
@@ -104,9 +133,10 @@ public:
                old.tlut_mode==tex.tlut_mode && old.memory.bytes==tex.memory.bytes)return i;
             fail("Texture content key collision");
         }
-        std::uint64_t allocated=tex.pixels.size()*sizeof(Color)+4096;
-        for(const auto& t:out.textures)allocated+=t.pixels.size()*sizeof(Color)+4096;
+        // Running total of every stored texture (was re-summed per store: O(n^2)).
+        const std::uint64_t allocated=texture_bytes+tex.pixels.size()*sizeof(Color)+4096;
         if(allocated>64*1024*1024)fail("Owned texture payload exceeds 64 MiB");
+        texture_bytes=allocated;
         out.textures.push_back(std::move(tex));return out.textures.size()-1;
     }
     unsigned snapshot(unsigned index) {
@@ -209,13 +239,39 @@ public:
         input_range(img.address,(std::uint64_t(width)*height*(4u<<size)+7)/8);
         Texture tex;tex.width=width;tex.height=height;tex.background=true;
         tex.tile.format=format;tex.tile.size=size;tex.tile.palette=half(descriptor+24);
-        tex.pixels.reserve(width*height);
-        for(unsigned y=0;y<height;++y) {
-            poll();
-            for(unsigned x=0;x<width;++x)
-                tex.pixels.push_back(source_texel(out.initial_ram,img,x,y,tex.tile.palette,tmem,(state.other_hi>>14)&3));
+        const unsigned mode=(state.other_hi>>14)&3;
+        const std::size_t source_size=std::size_t((std::uint64_t(width)*height*(4u<<size)+7)/8);
+        const auto source=std::span<const std::uint8_t>(out.initial_ram).subspan(img.address,source_size);
+        auto& cache=background_cache();
+        const BackgroundCacheEntry* hit=nullptr;
+        for(const auto& e:cache)
+            if(e.image==img && e.height==height && e.palette==tex.tile.palette && e.mode==mode
+               && std::equal(e.source.begin(),e.source.end(),source.begin(),source.end())
+               && (format!=2 || e.tmem==tmem.bytes)) {hit=&e;break;}
+        unsigned texture_index;
+        if(hit) {
+            tex.pixels=hit->pixels;
+            texture_index=store_known(std::move(tex),hit->key);
+        } else {
+            tex.pixels.reserve(width*height);
+            for(unsigned y=0;y<height;++y) {
+                poll();
+                for(unsigned x=0;x<width;++x)
+                    tex.pixels.push_back(source_texel(out.initial_ram,img,x,y,tex.tile.palette,tmem,mode));
+            }
+            texture_index=store(std::move(tex));
+            BackgroundCacheEntry entry;
+            entry.image=img;entry.height=height;entry.palette=out.textures[texture_index].tile.palette;entry.mode=mode;
+            entry.source.assign(source.begin(),source.end());
+            if(format==2)entry.tmem=tmem.bytes;
+            entry.pixels=out.textures[texture_index].pixels;
+            entry.key=out.textures[texture_index].key;
+            // Menus draw ~17 background pieces per frame, briefings ~8: a 4-entry
+            // FIFO evicted every piece before its next use (profile: 0 hits).
+            if(cache.size()>=64)cache.erase(cache.begin());
+            cache.push_back(std::move(entry));
         }
-        Rectangle r;r.texture=store(std::move(tex));
+        Rectangle r;r.texture=texture_index;
         r.x0=std::int16_t(half(descriptor+4));r.y0=std::int16_t(half(descriptor+12));
         r.x1=r.x0+half(descriptor+6);r.y1=r.y0+half(descriptor+14);
         if((r.x0&3) || (r.y0&3) || (r.x1&3) || (r.y1&3))

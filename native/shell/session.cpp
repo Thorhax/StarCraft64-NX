@@ -153,6 +153,8 @@ void Session::start_runtime(std::vector<std::uint8_t> rom, const std::filesystem
     config.window_handle = {reinterpret_cast<void*>(1), nullptr};
 #elif defined(_WIN32)
     config.window_handle = {reinterpret_cast<HWND>(1), 0};
+#elif defined(__SWITCH__)
+    config.window_handle = reinterpret_cast<void*>(1);
 #else
     config.window_handle = reinterpret_cast<SDL_Window*>(1);
 #endif
@@ -243,8 +245,16 @@ extern "C" void sc64_capture_submit(std::uint8_t* rdram, const OSTask* task) {
         const auto t = task->t;
         if (t.type != M_GFXTASK || t.ucode_size != 4096) throw std::runtime_error("Unknown graphics task");
         const auto snapshot_start=std::chrono::steady_clock::now();
-        std::vector<std::uint8_t> canonical(0x800000);
-        for (std::size_t i = 0; i < canonical.size(); ++i) canonical[i] = rdram[i ^ 3];
+        // Big-endian copy of the live RDRAM. rdram keeps host-order 32-bit words, so
+        // canonical[i] = rdram[i ^ 3] is one byte swap per word; the buffer is reused
+        // per thread (the DrawList copies what it keeps). Was a per-byte loop on a
+        // freshly zeroed 8 MiB vector: ~26 ms per frame on Switch.
+        thread_local std::vector<std::uint8_t> canonical(0x800000);
+        {
+            const auto* words = reinterpret_cast<const std::uint32_t*>(rdram);
+            auto* out = reinterpret_cast<std::uint32_t*>(canonical.data());
+            for (std::size_t i = 0; i < canonical.size() / 4; ++i) out[i] = __builtin_bswap32(words[i]);
+        }
         unsigned ucode = t.ucode & 0x1fffffff;
         if (ucode > canonical.size() - 4096 || sha1({canonical.data() + ucode, 4096}) != "7d0f686719afde0703d377ccc7a492318c01eec0")
             throw std::runtime_error("Graphics microcode identity mismatch");

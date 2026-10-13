@@ -4,6 +4,9 @@
 #include <vector>
 
 namespace sc64::runtime {
+// Touch cursor warp, x/y in 320x240 image units. Applied on the guest thread
+// at the start of the next cursor query (one-player mission only).
+void request_cursor_warp(double x, double y);
 struct UiItem {
     unsigned id = 0, group = 0;
     float x0 = 0, y0 = 0, x1 = 0, y1 = 0;

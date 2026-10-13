@@ -8,6 +8,7 @@
 
 namespace sc64::input {
 ServoTuning servo;
+void (*warp_cursor)(double, double) = nullptr;
 
 namespace {
 constexpr double pi = std::numbers::pi;
@@ -55,13 +56,13 @@ PadOutput camera(GestureState& s, CameraGesture& gesture, double x, double y, co
     // Short pulses with neutral fields let delayed snapshots retire the motion.
     const auto raw = [&](double error) {
         if (std::abs(error) <= 4) return 0.0;
-        const double units = std::abs(error) > 24 ? 4 : 2;
+        const double units = std::abs(error) > 64 ? 8 : std::abs(error) > 24 ? 4 : 2;
         const double n = 1.5 + units * *info.camera_divisor;
         return error < 0 ? -n : n;
     };
     const auto [sx, sy] = stick_from_raw(raw(dx), -raw(dy));
     if (sx == 0 && sy == 0) return {};
-    s.camera_drive = CameraDrive{sx, sy, field + 2, field + 8};
+    s.camera_drive = CameraDrive{sx, sy, field + 2, field + 4};
     return {button_z, sx, sy};
 }
 
@@ -374,6 +375,7 @@ PadOutput read(GestureState& s, const Info& info, bool blocked) {
     if (!s.active && !s.drag && s.hover) {
         s.drive.reset(); s.settle_until = 0;
         const bool touch = s.hover->touch;
+        if (touch && warp_cursor) { s.follow.reset(); warp_cursor(s.hover->x, s.hover->y); return {}; }
         const auto [x, y] = follow_mouse(s, info, Point{s.hover->x, s.hover->y},
             touch ? servo.action_step_cap : servo.hover_step_cap,
             touch ? servo.action_horizon : servo.hover_horizon,
@@ -386,6 +388,9 @@ PadOutput read(GestureState& s, const Info& info, bool blocked) {
     const bool continuous = finite(info.cursor_divisor) && *info.cursor_divisor > 0;
     if (continuous) {
         s.drive.reset(); s.settle_until = 0;
+        if (warp_cursor && (std::abs(target->x - info.cursor_x) > 1.5 || std::abs(target->y - info.cursor_y) > 1.5)) {
+            s.follow.reset(); s.stable.reset(); warp_cursor(target->x, target->y); return {held};
+        }
         const auto [x, y] = follow_mouse(s, info, *target, servo.action_step_cap, servo.action_horizon,
                                          servo.action_age_gain);
         if (std::abs(target->x - info.cursor_x) > 1.5 || std::abs(target->y - info.cursor_y) > 1.5) {
