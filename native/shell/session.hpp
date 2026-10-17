@@ -113,6 +113,12 @@ public:
     PauseClock::Clock::time_point started{};
     // Created before guest startup, destroyed in stop() after guest threads join.
     std::unique_ptr<gfx::RasterPool> raster;
+    // Optional GPU rasterizer (Switch). Returns false to fall back to software.
+    // Set before the guest starts. gpu_check renders every frame both ways,
+    // logs the differences and keeps the software result.
+    std::function<bool(const gfx::DrawList&, gfx::SoftwareResult&, const std::function<void()>&)> gpu_render;
+    bool gpu_check = false;
+    std::atomic<std::uint64_t> gpu_frames{0}, software_frames{0};
 private:
     std::thread worker_;
     runtime::FirstError error_;

@@ -1,4 +1,5 @@
 #include "session.hpp"
+#include "log.hpp"
 #include "audio.hpp"
 #include "clock_bridge.hpp"
 #include "rdp_writeback.hpp"
@@ -237,6 +238,44 @@ bool sc64_rom_is_preloaded(const std::u8string& game_id) {
 }
 std::chrono::high_resolution_clock::time_point sc64_runtime_now() { return sc64::desktop::session().clock.now(); }
 void sc64_pause_point() { sc64::desktop::session().clock.wait(); }
+namespace {
+// GPU validation mode: compare the GPU result with the software reference
+// (write ranges and every RDRAM byte), log a summary every 60 frames plus the
+// first differing pixels, and keep the software result.
+void check_gpu_frame(const sc64::gfx::SoftwareResult& gpu, sc64::gfx::SoftwareResult software,
+                     sc64::gfx::SoftwareResult& keep) {
+    static std::uint64_t frames=0, identical=0, bad_pixels=0, worst=0, reported=0;
+    std::uint64_t differing=0;
+    std::size_t first=SIZE_MAX;
+    for(std::size_t i=0;i<software.ram.size() && i<gpu.ram.size();i+=2)
+        if(software.ram[i]!=gpu.ram[i] || software.ram[i+1]!=gpu.ram[i+1]) {
+            if(first==SIZE_MAX)first=i;
+            ++differing;
+        }
+    const bool same_writes=gpu.writes.size()==software.writes.size() && std::equal(gpu.writes.begin(),gpu.writes.end(),
+        software.writes.begin(),[](auto a,auto b){return a.address==b.address && a.length==b.length;});
+    ++frames;
+    if(!differing && same_writes)++identical;
+    bad_pixels+=differing;
+    worst=std::max(worst,differing);
+    if(first!=SIZE_MAX && reported<20) {
+        ++reported;
+        sc64::shell::log::warning("GL check: frame %llu, %llu pixels differ, first at 0x%06zx gpu %04x sw %04x",
+            (unsigned long long)frames,(unsigned long long)differing,first,
+            unsigned((gpu.ram[first]<<8)|gpu.ram[first+1]),unsigned((software.ram[first]<<8)|software.ram[first+1]));
+    } else if(!same_writes && reported<20) {
+        ++reported;
+        sc64::shell::log::warning("GL check: frame %llu, same pixels but write ranges differ (gpu %zu, sw %zu)",
+            (unsigned long long)frames,gpu.writes.size(),software.writes.size());
+    }
+    if(frames%60==0)
+        sc64::shell::log::info("GL check: %llu frames, %llu identical, %llu differing pixels (worst frame %llu)",
+            (unsigned long long)frames,(unsigned long long)identical,(unsigned long long)bad_pixels,
+            (unsigned long long)worst);
+    keep=std::move(software);
+}
+}
+
 extern "C" void sc64_capture_submit(std::uint8_t* rdram, const OSTask* task) {
     using namespace sc64::desktop;
     sc64::runtime::report_host_failure<ultramodern::thread_terminated>([&] {
@@ -285,11 +324,24 @@ extern "C" void sc64_capture_submit(std::uint8_t* rdram, const OSTask* task) {
         auto rendered=std::make_shared<RenderedFrame>();
         const auto start=std::chrono::steady_clock::now();
         std::chrono::steady_clock::duration serviced{};
-        rendered->pixels=sc64::gfx::render_software(*list,[&] {
+        const auto serviced_guest=[&] {
             const auto before=std::chrono::steady_clock::now();
             service_guest();
             serviced+=std::chrono::steady_clock::now()-before;
-        },session().raster.get());
+        };
+        bool gpu=false;
+        if(session().gpu_render) {
+            sc64::gfx::SoftwareResult gpu_result;
+            if(session().gpu_render(*list,gpu_result,serviced_guest)) {
+                gpu=true;
+                if(session().gpu_check)
+                    check_gpu_frame(gpu_result,sc64::gfx::render_software(*list,serviced_guest,session().raster.get()),
+                                    rendered->pixels);
+                else rendered->pixels=std::move(gpu_result);
+            }
+        }
+        if(!gpu)rendered->pixels=sc64::gfx::render_software(*list,serviced_guest,session().raster.get());
+        ++(gpu?session().gpu_frames:session().software_frames);
         rendered->software_ms=std::chrono::duration<double,std::milli>(
             std::chrono::steady_clock::now()-start).count();
         rendered->software_service_ms=std::chrono::duration<double,std::milli>(serviced).count();

@@ -505,7 +505,7 @@ void HostScript::update(double dt) {
             nlohmann::json compact;
             for (const char* key : {"fields", "tasks", "samples", "host_seconds", "script_seconds", "running", "paused",
                                     "input_active", "ui_mode", "guest_mode", "width", "height", "presented",
-                                    "render_driver", "software_ms", "software_service_ms", "raster_helpers",
+                                    "render_driver", "software_ms", "software_service_ms", "raster_helpers", "gpu_frames", "software_frames",
                                     "rumble_starts", "capture_snapshot_ms", "capture_interpret_ms",
                                     "audio_nonzero_frames", "audio_played_frames", "audio_underruns",
                                     "audio_dropped_frames", "audio_buffer_ms", "audio_buffering", "audio_source_hz",

@@ -5,6 +5,9 @@
 #include "native.hpp"
 #include "scripts.hpp"
 #include <switch.h>
+#if defined(SC64_SWITCH_GL)
+#include "gl_device.hpp"
+#endif
 #include <pthread.h>
 #include <algorithm>
 #include <array>
@@ -157,6 +160,10 @@ constexpr double analog_press = 0.5;
 struct App {
     Config config;
     FrameVideo video;
+#if defined(SC64_SWITCH_GL)
+    sc64::nx::GlDevice gl;
+#endif
+    bool use_gl = false;
     std::unique_ptr<Native> native;
     Shared shared;
     std::unique_ptr<FileLayoutStore> layouts;
@@ -251,12 +258,29 @@ int main(int argc, char* argv[]) {
         app->config.set("sc64.storage", storage_dir);
         // ROM read in place from the SD card (platform.cpp); no private copy.
         app->config.set("sc64.bundled_rom", "1");
+#if defined(SC64_SWITCH_GL)
+        app->use_gl = !std::filesystem::exists("sdmc:/switch/StarCraft64/nogl") && app->gl.create();
+        // GPU rasterization (sdmc:/switch/StarCraft64/softraster keeps it on the CPU;
+        // .../glcheck renders both ways and logs differences).
+        if (app->use_gl && app->gl.raster_ready()
+            && !std::filesystem::exists("sdmc:/switch/StarCraft64/softraster")) {
+            auto* device = &app->gl;
+            sc64::desktop::session().gpu_render = [device](const sc64::gfx::DrawList& list,
+                                                          sc64::gfx::SoftwareResult& out,
+                                                          const std::function<void()>& service) {
+                return device->render(list, out, service);
+            };
+            sc64::desktop::session().gpu_check = std::filesystem::exists("sdmc:/switch/StarCraft64/glcheck");
+        }
+        // GL only rasterizes; presentation stays on the libnx framebuffer.
+        app->use_gl = false;
+#endif
         app->video.create();
         auto* raw = app.get();
         app->native = std::make_unique<Native>(app->config, Native::Window{
             [] { return std::pair<double, double>(screen_w, screen_h); },
             [raw](int code) { raw->exit_code = code; },
-            [] { return std::string("libnx-framebuffer"); }});
+            [raw] { return std::string(raw->use_gl ? "egl-opengl" : "libnx-framebuffer"); }});
         app->native->initialize();
         app->layouts = std::make_unique<FileLayoutStore>(std::filesystem::path(app->native->storage())
                                                          / "touch-layout-v2.json");
@@ -274,10 +298,18 @@ int main(int argc, char* argv[]) {
             const double dt = double(armTicksToNs(now - last)) / 1e9;
             last = now;
             app->poll_input();
-            if (const auto upload = app->native->tick()) app->video.upload(*upload);
+            if (const auto upload = app->native->tick()) {
+#if defined(SC64_SWITCH_GL)
+                if (app->use_gl) app->gl.upload(*upload); else
+#endif
+                app->video.upload(*upload);
+            }
             app->host->update(dt);
             app->gui->update(dt);
             app->status->update();
+#if defined(SC64_SWITCH_GL)
+            if (app->use_gl) app->gl.draw(app->native->visible()); else
+#endif
             app->video.draw(app->native->visible());
             app->native->after_render([] { return Readback{}; });
         }
@@ -289,6 +321,10 @@ int main(int argc, char* argv[]) {
     if (app->gui) app->gui->final();
     if (app->host) app->host->final();
     if (app->native) app->native->finalize();
+    sc64::desktop::session().gpu_render = nullptr;
+#if defined(SC64_SWITCH_GL)
+    app->gl.destroy();
+#endif
     app->video.destroy();
     std::fflush(stdout); std::fflush(stderr);
     return result;

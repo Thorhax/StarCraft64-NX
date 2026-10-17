@@ -389,6 +389,7 @@ nlohmann::json Native::telemetry() {
         {"vi_origin", scanout_.regs[1]}, {"cpu_swaps", s.cpu_swaps.load()}, {"vi_rows", presented_region_.height},
         {"render_driver", window_.renderer()}, {"upload_bytes", upload_bytes_}, {"software_ms", software_ms_},
         {"software_service_ms", software_service_ms_}, {"raster_helpers", s.raster ? s.raster->helpers() : 0},
+        {"gpu_frames", s.gpu_frames.load()}, {"software_frames", s.software_frames.load()},
         {"rumble_starts", s.rumble_starts.load()}, {"capture_snapshot_ms", s.capture_snapshot_ms.load()},
         {"capture_interpret_ms", s.capture_interpret_ms.load()}, {"system_cursor_hidden", system_cursor_hidden_},
         {"audio_underruns", audio::underruns()}, {"audio_dropped_frames", audio::dropped()},

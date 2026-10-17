@@ -70,13 +70,34 @@ target_link_libraries(sc64_scripts PUBLIC sc64_input)
   target_include_directories(sc64_switch PRIVATE /opt/devkitpro/libnx/include)
   target_link_libraries(sc64_switch PRIVATE sc64_shell "${SC64_LIBNX}")
   target_link_options(sc64_switch PRIVATE -Wl,--gc-sections -Wl,--wrap=pthread_create)
+# Mesa for Horizon (tools/switch/import_portlibs.sh, mounted by build.sh): EGL +
+# OpenGL (Zink on loaderless NVK). Optional: without it the build stays
+# software-only with libnx framebuffer presentation.
+set(SC64_SWITCH_GL_CONFIG "/opt/devkitpro/portlibs/switch/lib/cmake/OpenGL")
+if(EXISTS "${SC64_SWITCH_GL_CONFIG}/OpenGLConfig.cmake")
+    set(OpenGL_DIR "${SC64_SWITCH_GL_CONFIG}")
+    find_package(OpenGL CONFIG REQUIRED)
+    target_link_libraries(sc64_switch PRIVATE OpenGL::GL OpenGL::EGL)
+    target_compile_definitions(sc64_switch PRIVATE SC64_SWITCH_GL=1)
+    target_sources(sc64_switch PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/gl_video.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/gl_device.cpp ${CMAKE_CURRENT_SOURCE_DIR}/gl_raster.cpp)
+    message(STATUS "SC64 Switch: Mesa EGL/OpenGL enabled")
+else()
+    message(STATUS "SC64 Switch: Mesa portlibs not found, software presentation only")
+endif()
   set_target_properties(sc64_switch PROPERTIES OUTPUT_NAME StarCraft64)
   # NRO packaging with the devkitPro tools (nacptool, elf2nro).
   find_program(SC64_NACPTOOL nacptool PATHS /opt/devkitpro/tools/bin REQUIRED)
   find_program(SC64_ELF2NRO elf2nro PATHS /opt/devkitpro/tools/bin REQUIRED)
   set(SC64_NACP "${CMAKE_CURRENT_BINARY_DIR}/StarCraft64.nacp")
+set(SC64_SWITCH_VERSION "0.5.0")
+set(SC64_SWITCH_ICON "${SC64_ROOT}/local/icons/switch-icon.jpg")
+set(SC64_ICON_ARGUMENT "")
+if(EXISTS "${SC64_SWITCH_ICON}")
+    set(SC64_ICON_ARGUMENT "--icon=${SC64_SWITCH_ICON}")
+endif()
   set(SC64_NRO "${CMAKE_CURRENT_BINARY_DIR}/StarCraft64.nro")
   add_custom_command(TARGET sc64_switch POST_BUILD
-      COMMAND "${SC64_NACPTOOL}" --create "StarCraft 64" "SC64 recomp (personal build)" "0.1.0" "${SC64_NACP}"
-      COMMAND "${SC64_ELF2NRO}" "$<TARGET_FILE:sc64_switch>" "${SC64_NRO}" "--nacp=${SC64_NACP}"
+      COMMAND "${SC64_NACPTOOL}" --create "StarCraft 64" "gabryboy12-ai" "${SC64_SWITCH_VERSION}" "${SC64_NACP}"
+      COMMAND "${SC64_ELF2NRO}" "$<TARGET_FILE:sc64_switch>" "${SC64_NRO}" "--nacp=${SC64_NACP}" ${SC64_ICON_ARGUMENT}
       COMMENT "Packaging ${SC64_NRO}" VERBATIM)

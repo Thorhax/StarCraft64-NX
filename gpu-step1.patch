@@ -1,0 +1,53 @@
+diff --git a/native/switch/app.cpp b/native/switch/app.cpp
+index cc2ebea..77324e6 100644
+--- a/native/switch/app.cpp
++++ b/native/switch/app.cpp
+@@ -5,6 +5,9 @@
+ #include "native.hpp"
+ #include "scripts.hpp"
+ #include <switch.h>
++#if defined(SC64_SWITCH_GL)
++#include <EGL/egl.h>
++#endif
+ #include <pthread.h>
+ #if defined(SC64_SWITCH_GL)
+ #include <EGL/egl.h>
+@@ -157,6 +160,28 @@ constexpr std::array<ButtonBinding, 12> button_bindings = {{
+ }};
+ constexpr double analog_press = 0.5;
+ 
++#if defined(SC64_SWITCH_GL)
++// Step 1 of the GPU renderer: prove Mesa links and its EGL display initializes
++// on this console (no surface, no change to presentation yet).
++void probe_egl() {
++    EGLDisplay display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
++    if (display == EGL_NO_DISPLAY) {
++        sc64::shell::log::warning("EGL probe: no default display");
++        return;
++    }
++    EGLint major = 0, minor = 0;
++    if (!eglInitialize(display, &major, &minor)) {
++        sc64::shell::log::warning("EGL probe: eglInitialize failed (0x%x)", unsigned(eglGetError()));
++        return;
++    }
++    const char* vendor = eglQueryString(display, EGL_VENDOR);
++    const char* apis = eglQueryString(display, EGL_CLIENT_APIS);
++    sc64::shell::log::info("EGL probe: EGL %d.%d, vendor %s, client APIs %s", int(major), int(minor),
++                           vendor ? vendor : "?", apis ? apis : "?");
++    eglTerminate(display);
++}
++#endif
++
+ struct App {
+     Config config;
+     FrameVideo video;
+@@ -275,6 +300,9 @@ int main(int argc, char* argv[]) {
+         app->config.set("sc64.storage", storage_dir);
+         // ROM read in place from the SD card (platform.cpp); no private copy.
+         app->config.set("sc64.bundled_rom", "1");
++#if defined(SC64_SWITCH_GL)
++        probe_egl();
++#endif
+         app->video.create();
+         auto* raw = app.get();
+         app->native = std::make_unique<Native>(app->config, Native::Window{
