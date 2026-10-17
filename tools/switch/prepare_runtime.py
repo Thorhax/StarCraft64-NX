@@ -36,7 +36,7 @@ PATCHES = [
      '    if (name == "VI Thread") { core = 0; priority = 0x28; }\n'
      '    else if (name == "Timer Thread") { core = 0; priority = 0x29; }\n'
      '    else if (name == "SP Task Thread") { core = 1; priority = 0x2A; } // short audio tasks ahead of guest code\n'
-     '    else if (name == "Gfx Thread") { core = 2; priority = 0x2C; }     // renderer owns core 2\n'
+     '    else if (name == "Gfx Thread") { core = 0; priority = 0x2D; }     // async graphics: interpret/commit on core 0, below the shell\n'
      '    svcSetThreadCoreMask(0xFFFF8000u, core, 1u << core);\n'
      '    svcSetThreadPriority(0xFFFF8000u, priority);\n'
      '}\n'
@@ -115,6 +115,13 @@ PATCHES = [
      '#else\n'
      '    if (!posix_memalign(&ptr, align, size))\n        return ptr;\n    return NULL;\n'
      '#endif'),
+    ('ultramodern/src/events.cpp',
+     '                renderer_context->send_dl(&task_action->task);',
+     '                sp_complete(); // SC64 async graphics: RSP done at once (as upstream), RDP after the work\n'
+     '                renderer_context->send_dl(&task_action->task);'),
+    ('ultramodern/src/events.cpp',
+     '                sp_complete();\n                dp_complete();',
+     '                dp_complete();'),
 ]
 
 

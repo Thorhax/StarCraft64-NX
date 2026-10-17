@@ -118,6 +118,9 @@ public:
     // logs the differences and keeps the software result.
     std::function<bool(const gfx::DrawList&, gfx::SoftwareResult&, const std::function<void()>&)> gpu_render;
     bool gpu_check = false;
+    // Switch: interpret/rasterize on the Gfx thread while the guest continues
+    // (DP completion follows the work). Off: render on the submitting thread.
+    bool async_graphics = false;
     std::atomic<std::uint64_t> gpu_frames{0}, software_frames{0};
 private:
     std::thread worker_;

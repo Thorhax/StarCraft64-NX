@@ -277,6 +277,8 @@ int main(int argc, char* argv[]) {
 #endif
         app->video.create();
         auto* raw = app.get();
+        // Graphics tasks run on the Gfx thread while the game continues (like the RCP).
+        sc64::desktop::session().async_graphics = true;
         app->native = std::make_unique<Native>(app->config, Native::Window{
             [] { return std::pair<double, double>(screen_w, screen_h); },
             [raw](int code) { raw->exit_code = code; },

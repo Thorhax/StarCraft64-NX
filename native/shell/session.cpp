@@ -14,6 +14,7 @@
 #include <xxHash/xxh3.h>
 #include "../runtime/sha.hpp"
 #include <algorithm>
+#include <deque>
 #include <fstream>
 #include <sstream>
 #include <iomanip>
@@ -34,9 +35,24 @@ struct SubmissionGuard {
     }
     ~SubmissionGuard() { preparing_task.clear(); }
 };
-std::shared_ptr<const gfx::DrawList> pending;
-std::shared_ptr<const RenderedFrame> pending_rendered;
-sc64::runtime::FrontendFeedback pending_ui;
+// Asynchronous graphics, as on the RCP: at osSpTaskStart the guest thread only
+// snapshots RDRAM and continues; the Gfx thread interprets, rasterizes, commits
+// the RDP stores and publishes the frame, and only then are SP/DP completion
+// signalled. The game waits for DP completion before using the results.
+struct SubmittedTask {
+    std::vector<std::uint8_t> ram;   // canonical (big-endian) RDRAM at submission
+    std::uint8_t* rdram = nullptr;   // live guest RAM, for the RDP stores
+    std::uint32_t ucode = 0, data_ptr = 0;
+    sc64::runtime::FrontendFeedback ui;
+    // Synchronous mode (async_graphics off): already rendered on the guest thread.
+    std::shared_ptr<gfx::DrawList> list;
+    std::shared_ptr<const RenderedFrame> rendered;
+};
+std::mutex submitted_mutex;
+std::deque<std::unique_ptr<SubmittedTask>> submitted;
+std::vector<std::vector<std::uint8_t>> snapshot_pool; // recycled 8 MiB snapshot buffers
+std::shared_ptr<const RenderedFrame> render_task(SubmittedTask& job, std::shared_ptr<gfx::DrawList>& list,
+                                                const std::function<void()>& service);
 std::string sha1(std::span<const std::uint8_t> bytes) { return runtime::sha1_hex(bytes); }
 class Renderer final : public ultramodern::renderer::RendererContext {
 public:
@@ -47,12 +63,21 @@ public:
     bool valid() override { return true; }
     bool update_config(const ultramodern::renderer::GraphicsConfig&, const ultramodern::renderer::GraphicsConfig&) override { return true; }
     void enable_instant_present() override {}
+    // Gfx thread, in submission order; SP/DP completion follows this call.
     void send_dl(const OSTask*) override {
-        std::lock_guard lock(pending_mutex);
-        if (pending) {
-            completed_task_=pending->identity.task;
-            session().mailbox.publish(std::exchange(pending, {}), std::move(pending_ui),
-                                     std::exchange(pending_rendered, {}));
+        std::unique_ptr<SubmittedTask> job;
+        {
+            std::lock_guard lock(submitted_mutex);
+            if (submitted.empty()) return;
+            job = std::move(submitted.front());
+            submitted.pop_front();
+        }
+        try {
+            if (!job->rendered) job->rendered = render_task(*job, job->list, [] {});
+            completed_task_ = job->list->identity.task;
+            session().mailbox.publish(std::move(job->list), std::move(job->ui), std::move(job->rendered));
+        } catch (const std::exception& error) {
+            session().fail(error.what());
         }
     }
     void send_dummy_workload(std::uint32_t) override {}
@@ -276,6 +301,51 @@ void check_gpu_frame(const sc64::gfx::SoftwareResult& gpu, sc64::gfx::SoftwareRe
 }
 }
 
+namespace sc64::desktop {
+namespace {
+// Gfx thread: everything that used to run on the guest thread after the
+// snapshot. No guest servicing is needed here: the guest keeps running.
+std::shared_ptr<const RenderedFrame> render_task(SubmittedTask& job, std::shared_ptr<gfx::DrawList>& list,
+                                                const std::function<void()>& no_service) {
+    const auto& canonical = job.ram;
+    const unsigned ucode = job.ucode & 0x1fffffff;
+    if (ucode > canonical.size() - 4096 || sha1({canonical.data() + ucode, 4096}) != "7d0f686719afde0703d377ccc7a492318c01eec0")
+        throw std::runtime_error("Graphics microcode identity mismatch");
+    const auto interpret_start = std::chrono::steady_clock::now();
+    list = std::make_shared<gfx::DrawList>(gfx::interpret_gbi(canonical, job.data_ptr & 0x1fffffff, no_service));
+    session().capture_interpret_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - interpret_start).count();
+    {
+        // The DrawList owns its copy of the snapshot: recycle the buffer.
+        std::lock_guard lock(submitted_mutex);
+        if (snapshot_pool.size() < 3) snapshot_pool.push_back(std::move(job.ram));
+    }
+    list->identity.task = ++session().tasks;
+    list->identity.field = session().fields;
+    for (const auto& rect : list->rectangles) session().cpu_scanouts.targeted(rect.target.address, list->identity.task);
+    auto rendered = std::make_shared<RenderedFrame>();
+    const auto start = std::chrono::steady_clock::now();
+    bool gpu = false;
+    if (session().gpu_render) {
+        gfx::SoftwareResult gpu_result;
+        if (session().gpu_render(*list, gpu_result, no_service)) {
+            gpu = true;
+            if (session().gpu_check)
+                ::check_gpu_frame(gpu_result, gfx::render_software(*list, no_service, session().raster.get()), rendered->pixels);
+            else rendered->pixels = std::move(gpu_result);
+        }
+    }
+    if (!gpu) rendered->pixels = gfx::render_software(*list, no_service, session().raster.get());
+    ++(gpu ? session().gpu_frames : session().software_frames);
+    rendered->software_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+    rendered->software_service_ms = 0;
+    // RDP stores into live guest RAM, before DP completion is signalled.
+    commit_rdp_writes(rendered->pixels, {job.rdram, std::size_t(0x800000)});
+    return rendered;
+}
+}
+}
+
 extern "C" void sc64_capture_submit(std::uint8_t* rdram, const OSTask* task) {
     using namespace sc64::desktop;
     sc64::runtime::report_host_failure<ultramodern::thread_terminated>([&] {
@@ -284,72 +354,40 @@ extern "C" void sc64_capture_submit(std::uint8_t* rdram, const OSTask* task) {
         const auto t = task->t;
         if (t.type != M_GFXTASK || t.ucode_size != 4096) throw std::runtime_error("Unknown graphics task");
         const auto snapshot_start=std::chrono::steady_clock::now();
-        // Big-endian copy of the live RDRAM. rdram keeps host-order 32-bit words, so
-        // canonical[i] = rdram[i ^ 3] is one byte swap per word; the buffer is reused
-        // per thread (the DrawList copies what it keeps). Was a per-byte loop on a
-        // freshly zeroed 8 MiB vector: ~26 ms per frame on Switch.
-        thread_local std::vector<std::uint8_t> canonical(0x800000);
+        auto job=std::make_unique<SubmittedTask>();
+        {
+            std::lock_guard lock(submitted_mutex);
+            if(!snapshot_pool.empty()) { job->ram=std::move(snapshot_pool.back()); snapshot_pool.pop_back(); }
+        }
+        if(job->ram.size()!=0x800000)job->ram.resize(0x800000); // first use only; later buffers are recycled
+        // Big-endian copy of the live RDRAM: rdram keeps host-order 32-bit words,
+        // so canonical[i] = rdram[i ^ 3] is one byte swap per word.
         {
             const auto* words = reinterpret_cast<const std::uint32_t*>(rdram);
-            auto* out = reinterpret_cast<std::uint32_t*>(canonical.data());
-            for (std::size_t i = 0; i < canonical.size() / 4; ++i) out[i] = __builtin_bswap32(words[i]);
+            auto* out = reinterpret_cast<std::uint32_t*>(job->ram.data());
+            for (std::size_t i = 0; i < job->ram.size() / 4; ++i) out[i] = __builtin_bswap32(words[i]);
         }
-        unsigned ucode = t.ucode & 0x1fffffff;
-        if (ucode > canonical.size() - 4096 || sha1({canonical.data() + ucode, 4096}) != "7d0f686719afde0703d377ccc7a492318c01eec0")
-            throw std::runtime_error("Graphics microcode identity mismatch");
-        const auto interpret_start=std::chrono::steady_clock::now();
-        session().capture_snapshot_ms=std::chrono::duration<double,std::milli>(interpret_start-snapshot_start).count();
-        auto last_poll=interpret_start;
-        auto service_guest=[&] {
-            const auto now=std::chrono::steady_clock::now();
-            if(now-last_poll<std::chrono::milliseconds(1))return;
-            // The live RAM snapshot is complete. Parsing/texture decoding and
-            // rasterization touch owned bytes; service higher guest priorities
-            // throughout both stages, with no publication mutex held.
-            ultramodern::wait_for_external_message_timed(rdram,0);
-            ultramodern::check_running_queue(rdram);
-            last_poll=std::chrono::steady_clock::now();
-        };
-        auto list = std::make_shared<sc64::gfx::DrawList>(sc64::gfx::interpret_gbi(canonical, t.data_ptr & 0x1fffffff,service_guest));
-        session().capture_interpret_ms=std::chrono::duration<double,std::milli>(
-            std::chrono::steady_clock::now()-interpret_start).count();
-        list->identity.task = ++session().tasks; list->identity.field = session().fields;
-        for (const auto& rect:list->rectangles)
-            session().cpu_scanouts.targeted(rect.target.address,list->identity.task);
-        { std::lock_guard lock(pending_mutex);
-          if (pending) throw std::runtime_error("Unexpected overlapping graphics tasks"); }
-        // Rasterize the owned snapshot, then resume guest RAM ownership for
-        // byte-granular RDP stores. SP/DP signal only after taking this packet.
-        // Dropping presentation packets must never drop RDP memory effects.
-        auto rendered=std::make_shared<RenderedFrame>();
-        const auto start=std::chrono::steady_clock::now();
-        std::chrono::steady_clock::duration serviced{};
-        const auto serviced_guest=[&] {
-            const auto before=std::chrono::steady_clock::now();
-            service_guest();
-            serviced+=std::chrono::steady_clock::now()-before;
-        };
-        bool gpu=false;
-        if(session().gpu_render) {
-            sc64::gfx::SoftwareResult gpu_result;
-            if(session().gpu_render(*list,gpu_result,serviced_guest)) {
-                gpu=true;
-                if(session().gpu_check)
-                    check_gpu_frame(gpu_result,sc64::gfx::render_software(*list,serviced_guest,session().raster.get()),
-                                    rendered->pixels);
-                else rendered->pixels=std::move(gpu_result);
-            }
+        job->rdram=rdram;
+        job->ucode=t.ucode;
+        job->data_ptr=t.data_ptr;
+        job->ui=sc64::runtime::take_frontend_feedback();
+        session().capture_snapshot_ms=std::chrono::duration<double,std::milli>(
+            std::chrono::steady_clock::now()-snapshot_start).count();
+        if(!session().async_graphics) {
+            // Synchronous (Android/desktop): render here, servicing higher guest
+            // priorities every millisecond; the Gfx thread only publishes.
+            auto last_poll=std::chrono::steady_clock::now();
+            const std::function<void()> service_guest=[&] {
+                const auto now=std::chrono::steady_clock::now();
+                if(now-last_poll<std::chrono::milliseconds(1))return;
+                ultramodern::wait_for_external_message_timed(rdram,0);
+                ultramodern::check_running_queue(rdram);
+                last_poll=std::chrono::steady_clock::now();
+            };
+            job->rendered=render_task(*job,job->list,service_guest);
         }
-        if(!gpu)rendered->pixels=sc64::gfx::render_software(*list,serviced_guest,session().raster.get());
-        ++(gpu?session().gpu_frames:session().software_frames);
-        rendered->software_ms=std::chrono::duration<double,std::milli>(
-            std::chrono::steady_clock::now()-start).count();
-        rendered->software_service_ms=std::chrono::duration<double,std::milli>(serviced).count();
-        commit_rdp_writes(rendered->pixels,{rdram,canonical.size()});
-        std::lock_guard lock(pending_mutex);
-        pending_rendered=std::move(rendered);
-        pending = std::move(list);
-        pending_ui = sc64::runtime::take_frontend_feedback();
+        std::lock_guard lock(submitted_mutex);
+        submitted.push_back(std::move(job));
     }, [](const char* error) { session().fail(error); });
 }
 // osViSwapBuffer on the guest thread: the guest declares this framebuffer
