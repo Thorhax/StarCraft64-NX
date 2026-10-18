@@ -27,6 +27,7 @@ struct State {
     std::uint64_t combine = 0;
     std::uint32_t other_hi = 0, other_lo = 0;
     Color primitive{255,255,255,255}, environment{}, blend{}, fog{};
+    std::uint32_t fill = 0; // SETFILLCOLOR word: two RGBA16 pixels (even x = high half)
     Scissor scissor;
     bool operator==(const State&) const = default;
 };
@@ -50,12 +51,13 @@ struct Texture {
     unsigned tlut_mode = 0;
     std::vector<Color> pixels;
 };
+constexpr unsigned no_texture = 0xffffffffu;
 struct Rectangle {
     int x0 = 0, y0 = 0, x1 = 0, y1 = 0; // screen signed 10.2, exclusive ends
     int s = 0, t = 0; // signed 10.5 texture coordinates
     int dsdx = 1024, dtdy = 1024; // signed 5.10, COPY already divided by four
     bool flip = false;
-    unsigned texture = 0;
+    unsigned texture = 0; // no_texture for FILL rectangles
     Image target;
     State state;
     std::uint32_t source_pc = 0;

@@ -1,4 +1,14 @@
-# Switch GPU renderer plan (v1.0)
+# Switch GPU renderer (implemented in v1.2)
+
+Status: implemented as planned below, with three changes found on hardware:
+OpenGL runs on the nouveau Gallium driver (NV12B), not Zink; presentation
+stays on the libnx framebuffer (a window-surface context beside the raster
+context latched nouveau submission errors, and a single window context made
+readbacks wait for vsync fences); the framebuffer is a linear SSBO with a
+GPU-side copy to a staging buffer (texture readback was detiled through
+uncached memory, ~30 ms a frame).
+
+## Original plan
 
 Goal: move rasterization off the CPU with Mesa for Horizon (NaGaa95/mesa-switch,
 NVK on GM20B), so menus/briefings reach the game's 30 fps cap and the port can

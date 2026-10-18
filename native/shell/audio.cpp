@@ -10,6 +10,9 @@
 #include <aaudio/AAudio.h>
 #endif
 #include <miniaudio.h>
+#if defined(SC64_VOICES)
+#include "voices.hpp"
+#endif
 #if defined(__SWITCH__)
 #include <switch.h>
 #include <cstdlib>
@@ -132,6 +135,9 @@ void mix(float* dst, ma_uint32 frames) {
     if (result.waiting) ++wait_count;
     played_count += result.played; nonzero_count += result.nonzero;
     buffered_frames = unsigned(pcm.size()); buffering = pcm.buffering();
+#if defined(SC64_VOICES)
+    sc64::voices::mix(dst, frames); // briefing voice over the game audio (ducked)
+#endif
 }
 void callback(ma_device* sink, void* output, const void*, ma_uint32 frames) {
     const auto begin = monotonic_ns();

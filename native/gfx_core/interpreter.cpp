@@ -199,6 +199,16 @@ public:
         case 0x3c:state.combine=(std::uint64_t(hi)<<32)|lo;break;
         case 0x38:state.fog=color(lo);break;
         case 0x39:state.blend=color(lo);break;
+        case 0x37:state.fill=lo;break;
+        case 0x36:{
+            // FILLRECTANGLE (Brood War loading screen clears). FILL mode stores
+            // the fill word directly; like COPY it includes the lower/right
+            // integer pixels (angrylion rdp_fill_rect / edge walker in FILL).
+            unsigned cycle=state.other_hi>>20&3;
+            if(cycle!=3)fail("FILLRECTANGLE outside FILL mode needs evidence",hi,lo);
+            Rectangle r;r.x0=lo>>12&4095;r.y0=lo&4095;r.x1=(hi>>12&4095|3)+1;r.y1=(hi&4095|3)+1;
+            r.texture=no_texture;emit(r);break;
+        }
         case 0x3a:state.primitive=color(lo);break;
         case 0x3b:state.environment=color(lo);break;
         case 0x24:case 0x25:{

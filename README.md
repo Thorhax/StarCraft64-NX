@@ -1,4 +1,4 @@
-# StarCraft 64 — Nintendo Switch port (v0.5)
+# StarCraft 64 — Nintendo Switch port (v1.3)
 
 Native **Nintendo Switch (Horizon / Atmosphère)** port of the
 [StarCraft 64 static recompilation](https://github.com/n0madic/StarCraft64-recomp)
@@ -76,24 +76,45 @@ Grazie per la comprensione e il continuo supporto.
 
 ---
 
-## Status (v0.5)
+## Status (v1.3)
 
-Fully playable. Measured on a Switch at stock clocks, launched as a Sphaira
-4-core forwarder:
+Fully playable, with a GPU renderer and the work spread over the CPU cores.
+Measured on a Switch launched as a Sphaira 4-core forwarder:
 
-| Screen | Resolution | Frame rate |
-|---|---|---|
-| Missions | 320×240 | ~22 fps (the original game caps at 30) |
-| Main menu | 640×480 | ~22 fps |
-| Briefings | 640×480 | ~13 fps |
+| Screen | Resolution | v0.5 (CPU renderer) | v1.2 (GPU renderer) |
+|---|---|---|---|
+| Missions | 320×240 | ~22 fps | ~27 fps (the original game caps at 30) |
+| Main menu | 640×480 | ~22 fps | ~26 fps |
+| Briefings | 640×480 | ~13 fps | ~17 fps |
+| Intro | 640×480 | ~50 fps | ~50 fps |
 
+- **GPU renderer**: Mesa for Horizon (nouveau, OpenGL 4.3). The fragment shader
+  reproduces the software rasterizer's integer rules and was validated
+  byte-for-byte against it (thousands of frames, 0 differing pixels). Frames it
+  does not model fall back to the software renderer automatically.
+- **Asynchronous graphics**, as on the real RCP: the game thread only snapshots
+  RDRAM and keeps running; display-list interpretation, GPU rendering and the
+  RDP stores run on other cores before the RDP completion is signalled.
+- **Low clocks**: playable down to 612 MHz CPU / 152 MHz GPU (lower frame
+  rate); 920 MHz CPU / 192 MHz GPU is a stable battery-saving setting.
+- **Voiced briefings** (new in v1.3): the original N64 briefings are text-only;
+  the port plays the PC voice acting from your own (free) StarCraft PC files,
+  in English, Italian, Spanish or Portuguese. Missions and transmissions are
+  matched automatically from the briefing text.
+- Brood War loading screens: RDP FILL mode (`SETFILLCOLOR`/`FILLRECTANGLE`)
 - Native audio (libnx `audout`), FlashRAM saves on the SD card
 - Joy-Con / Pro Controller and handheld touch screen (tap to point, drag to
   select, two-finger pan, instant touch cursor)
-- Software renderer spread over 4 cores (3 cores when launched from hbmenu)
 
-**Next (v1.0):** GPU renderer through Mesa NVK, to raise menus/briefings to the
-game's cap and allow lower clocks.
+| Core | Work |
+|---|---|
+| 0 | presentation, VI/timer, graphics thread (display lists, RDP stores) |
+| 1 | the game (StarCraft 64 is single-threaded) and the RDRAM snapshot |
+| 2 | OpenGL thread (texture planning, uploads, readback) |
+| 3 | system; raster helper when a frame falls back to software |
+
+**Next:** translated briefing and interface text (the voice files already
+come with translated briefing texts).
 
 ### Controls
 
@@ -169,7 +190,19 @@ PY
   --dump local/captures/synth/rdram.bin --output local/reports/libultra-resident
 ```
 
-### 4. Recompile, prepare the runtime, build
+### 4. Mesa for Horizon (GPU renderer)
+
+Install NaGaa95's Mesa SDK for Switch (EGL, OpenGL, Vulkan/NVK) in your
+Windows devkitPro, then import it into the build (it is merged with the
+Docker image's portlibs and mounted at build time):
+
+```bash
+./tools/switch/import_portlibs.sh /mnt/c/devkitPro/portlibs/switch
+```
+
+Without it the NRO still builds and runs with the software renderer.
+
+### 5. Recompile, prepare the runtime, build
 
 ```bash
 make recompile ROM="$ROM"
@@ -181,7 +214,7 @@ make icon ROM="$ROM" PYTHON=.venv/bin/python   # optional: NRO/forwarder icon fr
 ./tools/switch/build.sh                         # -> local/build/switch/StarCraft64.nro
 ```
 
-### 5. Install on the SD card
+### 6. Install on the SD card
 
 1. Create the folder `switch/StarCraft64/` on the SD card.
 2. Copy `local/build/switch/StarCraft64.nro` into it.
@@ -191,7 +224,7 @@ Never launch it from the album (applet mode has too little memory and CPU).
 Use one of the two methods below. Logs (`sc64.log`) and, after a crash, a
 `crash.txt` report are written to `switch/StarCraft64/`.
 
-### 6a. Sphaira forwarder (recommended: icon on the HOME menu, 4 cores)
+### 7a. Sphaira forwarder (recommended: icon on the HOME menu, 4 cores)
 
 A forwarder installs a HOME-menu icon that launches the NRO as a full
 application. Sphaira forwarders can also grant the 4th CPU core, which this
@@ -208,10 +241,68 @@ port uses for an extra raster thread (~10-20% faster menus).
 After updating the NRO (for example to get the icon), uninstall the old
 forwarder and create it again: a forwarder keeps the icon it was made with.
 
-### 6b. hbmenu title takeover
+### 7b. hbmenu title takeover
 
 Hold **R** while opening any installed game, then pick StarCraft 64 in hbmenu.
 This uses 3 cores: fully playable, slightly slower menus.
+
+### 8. Voiced briefings (optional)
+
+StarCraft 64's briefings have no voice acting. The port can play the PC
+version's, taken from **your own StarCraft PC install** (free from Blizzard);
+no audio is distributed with this project.
+
+1. **Install StarCraft** with the Battle.net app. In *Game Settings*, set both
+   the **text language** and the **spoken language** you want; each language
+   is downloaded only when selected (English is always needed, see below).
+2. **Extract the campaign maps** with [CascView](http://www.zezula.net/en/casc/main.html):
+   open the StarCraft folder (the one with `.build.info`) and extract, for each
+   language, its `campaign` folder into `<folder>/<code>/campaign`:
+
+   | Language | CascView path | Destination |
+   |---|---|---|
+   | English | `SD/campaign` | `CascView/enUS/campaign` |
+   | Italian | `locales/itIT/Assets/SD/campaign` | `CascView/itIT/campaign` |
+   | Spanish | `locales/esES/Assets/SD/campaign` | `CascView/esES/campaign` |
+   | Portuguese | `locales/ptBR/Assets/SD/campaign` | `CascView/ptBR/campaign` |
+
+   Tick *Local Files Only* in CascView to check that a language is really
+   downloaded before extracting it.
+3. **Convert** (WSL; reads each map's briefing script and converts the voices
+   to 24 kHz, about 220 MB per language):
+
+   ```bash
+   sudo apt install -y ffmpeg
+   python3 tools/voices/extract_briefings.py --source /mnt/c/Users/<you>/Desktop/CascView --out local/voices
+   ```
+
+   It prints one line per language, e.g.
+   `itIT: 77 briefings, 437 voice files, 0 missing`.
+4. **Copy** `local/voices` to the SD card as `switch/StarCraft64/voices`.
+   The `enUS` folder is **always required**: briefings are recognised by their
+   English text, whatever language you listen to.
+5. **Choose the language**: create the text file
+   `switch/StarCraft64/voices/language` containing one code — `enUS`
+   (default when the file is missing), `itIT`, `esES` or `ptBR`. The language
+   is read at start-up: restart the game after changing it.
+
+`sc64.log` shows `voices: 65 campaign briefings, language itIT` at start-up and
+one `voices: briefing matched <mission> ...` line per briefing. While a voice
+plays, the music is lowered.
+
+### Troubleshooting switches
+
+Empty files in `switch/StarCraft64/` change the renderer without rebuilding:
+
+| File | Effect |
+|---|---|
+| `softraster` | CPU renderer (v0.5 behaviour), GPU unused |
+| `nogl` | no Mesa at all |
+| `glcheck` | renders every frame on GPU and CPU, logs any difference (slow; for testing) |
+| `novoices` | silent briefings even when the voice files are installed |
+
+Create them from Windows with `New-Item E:\switch\StarCraft64\glcheck -ItemType File`
+(Notepad would add `.txt`).
 
 ## Android APK from Linux/WSL
 
@@ -223,10 +314,21 @@ and Build-Tools 36. See [docs/android.md](docs/android.md) and
 ## What changed for Switch
 
 - `native/switch/` — libnx shell (framebuffer video, HID pads + touch, crash
-  handler, 2 MiB thread stacks), SD platform layer, CMake profile
-- `tools/switch/` — Docker build, runtime derivation with asserted
-  `__SWITCH__` patches (semaphores, memory, thread cores/priorities, no code
-  mods), `addr2line` helper
+  handler, 2 MiB thread stacks), SD platform layer, CMake profile, and the GPU
+  renderer: `gl_raster.*` (DrawList rasterizer: per-axis texture addressing
+  tables on the CPU, integer fragment shader, linear SSBO framebuffer,
+  byte-budgeted texture cache) and `gl_device.*` (one surfaceless GL thread)
+- `native/shell/session.*` — asynchronous graphics submission (Switch) with
+  the original synchronous path kept for Android/desktop, GPU hook and the
+  `glcheck` validation mode
+- `native/shell/voices.*` — voiced briefings: reads the N64 briefing script
+  and page from RDRAM, matches missions/transmissions against the PC text,
+  streams the voice from the SD card and mixes it over the ducked game audio;
+  `tools/voices/extract_briefings.py` converts the user's PC campaign maps
+- `native/gfx_core/` — RDP FILL mode (Brood War loading screens)
+- `tools/switch/` — Docker build, Mesa portlibs import, runtime derivation with
+  asserted `__SWITCH__` patches (semaphores, memory, thread cores/priorities,
+  early RSP completion, no code mods), `addr2line` helper
 - Shared fixes that also help other platforms: word-swapped RDRAM snapshot,
   cross-frame S2DEX background cache, FlashRAM saves on FAT, touch cursor warp
   and faster two-finger camera pan
@@ -237,6 +339,8 @@ and Build-Tools 36. See [docs/android.md](docs/android.md) and
   the recompilation, runtime integration and renderer this port builds on
 - [N64Recomp / N64ModernRuntime](https://github.com/N64Recomp), devkitPro /
   libnx, decompals ultralib, shygoo n64sym, miniaudio, SDL
+- [NaGaa95/mesa-switch](https://github.com/NaGaa95/mesa-switch) — Mesa for
+  Horizon (nouveau OpenGL, NVK) that the GPU renderer runs on
 - Switch port: gabryboy12-ai
 
 Source code: MIT (see [LICENSE](LICENSE)), except files noted there.

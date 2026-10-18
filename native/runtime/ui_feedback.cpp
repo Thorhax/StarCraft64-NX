@@ -1,12 +1,18 @@
 #include "ui_feedback.hpp"
 #include "guest_addresses.hpp"
 #include "minimap.hpp"
+#if defined(SC64_VOICES)
+#include "voices.hpp"
+#endif
 #include <recomp.h>
 #include <algorithm>
 #include <mutex>
 #include <atomic>
 #include <bit>
 #include <cmath>
+#include <chrono>
+#include <cstdio>
+#include <string>
 
 namespace {
 namespace guest = sc64::runtime::guest;
@@ -27,7 +33,16 @@ bool address(std::uint32_t a, unsigned length) {
     return a >= 0x80000000 && a <= 0x80800000 - length;
 }
 
-extern "C" void sc64_ui_briefing(std::uint8_t*, recomp_context*, unsigned active) {
+#if defined(__SWITCH__)
+void briefing_probe(const std::uint8_t* ram, const recomp_context* ctx, bool active);
+#endif
+extern "C" void sc64_ui_briefing(std::uint8_t* ram, recomp_context* ctx, unsigned active) {
+#if defined(__SWITCH__)
+    briefing_probe(ram, ctx, active != 0);
+#endif
+#if defined(SC64_VOICES)
+    sc64::voices::observe(ram, active != 0);
+#endif
     std::lock_guard lock(mutex);
     briefing_active = active != 0;
 }
@@ -341,3 +356,64 @@ sc64::runtime::FrontendFeedback sc64::runtime::take_frontend_feedback() {
     // metadata survives only if the same context/pixels is actually presented.
     return result;
 }
+
+#if defined(__SWITCH__)
+// Diagnostics for voiced briefings (enabled by sdmc:/switch/StarCraft64/briefingprobe).
+// On the guest thread inside the briefing draw hook: logs every register that
+// points at readable text, and saves up to 12 canonical (big-endian) RDRAM
+// snapshots, one every 3 s while a briefing is shown, for offline analysis.
+namespace {
+void briefing_probe(const std::uint8_t* ram, const recomp_context* ctx, bool active) {
+    static int enabled = -1;
+    static bool was_active = false;
+    static std::string last_text;
+    static unsigned dumps = 0;
+    static std::chrono::steady_clock::time_point last_dump{};
+    if (enabled < 0) {
+        FILE* flag = std::fopen("sdmc:/switch/StarCraft64/briefingprobe", "rb");
+        enabled = flag != nullptr;
+        if (flag) std::fclose(flag);
+    }
+    if (!enabled) return;
+    if (active != was_active) {
+        std::printf("SC64 briefing probe: briefing %s\n", active ? "ON" : "OFF");
+        was_active = active;
+        last_text.clear();
+    }
+    if (!active) return;
+    const auto* regs = &ctx->r0; // r0..r31 are consecutive gpr fields
+    std::string text;
+    for (int r = 1; r < 32; ++r) {
+        const std::uint32_t a = std::uint32_t(regs[r]);
+        if (!address(a, 96)) continue;
+        std::string run;
+        for (unsigned i = 0; i < 96; ++i) {
+            const unsigned c = byte(ram, a + i);
+            if (c == 0) break;
+            if (c < 0x20 || c > 0x7e) { run.clear(); break; }
+            run.push_back(char(c));
+        }
+        if (run.size() >= 8) text += "r" + std::to_string(r) + "@" + std::to_string(a) + "=\"" + run + "\" ";
+    }
+    if (text != last_text) {
+        std::printf("SC64 briefing probe regs: %s\n", text.empty() ? "(no text)" : text.c_str());
+        last_text = text;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (dumps < 12 && now - last_dump >= std::chrono::seconds(3)) {
+        char name[64];
+        std::snprintf(name, sizeof(name), "sdmc:/switch/StarCraft64/brief_%02u.bin", dumps);
+        if (FILE* out = std::fopen(name, "wb")) {
+            std::vector<std::uint8_t> canonical(0x800000);
+            for (std::size_t i = 0; i < canonical.size(); ++i) canonical[i] = ram[i ^ 3];
+            std::fwrite(canonical.data(), 1, canonical.size(), out);
+            std::fclose(out);
+            std::printf("SC64 briefing probe: saved %s (last regs above)\n", name);
+        }
+        ++dumps;
+        last_dump = now;
+    }
+    std::fflush(stdout);
+}
+}
+#endif

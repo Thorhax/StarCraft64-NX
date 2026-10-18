@@ -3,6 +3,7 @@
 // guest runtime, raster helpers and audio keep their own threads.
 #include "log.hpp"
 #include "native.hpp"
+#include "voices.hpp"
 #include "scripts.hpp"
 #include <switch.h>
 #if defined(SC64_SWITCH_GL)
@@ -87,6 +88,19 @@ void terminate_handler() {
     }
     if (FILE* f = std::fopen("sdmc:/switch/StarCraft64/crash.txt", "w")) {
         std::fprintf(f, "Uncaught C++ exception: %s\n", what.c_str());
+        // Call chain into std::terminate (frame pointers), as ELF offsets.
+        MemoryInfo info{};
+        u32 page = 0;
+        svcQueryMemory(&info, &page, reinterpret_cast<u64>(&terminate_handler));
+        const u64 base = info.addr;
+        u64 fp = reinterpret_cast<u64>(__builtin_frame_address(0));
+        for (int depth = 0; depth < 32 && fp && !(fp & 0xf); ++depth) {
+            const u64* frame = reinterpret_cast<const u64*>(fp);
+            const u64 next = frame[0], ret = frame[1];
+            std::fprintf(f, "frame %d ret=0x%016lx (elf 0x%lx)\n", depth, ret, ret >= base ? ret - base : 0);
+            if (next <= fp || next - fp > 0x100000) break;
+            fp = next;
+        }
         std::fclose(f);
     }
     std::fflush(stdout); std::fflush(stderr);
@@ -284,6 +298,8 @@ int main(int argc, char* argv[]) {
             [raw](int code) { raw->exit_code = code; },
             [raw] { return std::string(raw->use_gl ? "egl-opengl" : "libnx-framebuffer"); }});
         app->native->initialize();
+        // Voiced briefings from the user's own PC files (tools/voices/extract_briefings.py).
+        sc64::voices::initialize(std::string(storage_dir) + "/voices");
         app->layouts = std::make_unique<FileLayoutStore>(std::filesystem::path(app->native->storage())
                                                          / "touch-layout-v2.json");
         app->host = std::make_unique<HostScript>(app->shared, *app->native, app->config);

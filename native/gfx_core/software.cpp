@@ -258,6 +258,34 @@ void raster_band(const DrawList& list,std::vector<std::uint8_t>& ram,Band& band,
         const auto& r=list.rectangles[index];
         unsigned phase=0;
         try {
+        if((r.state.other_hi>>20&3)==3) {
+            // FILL: the fill word as is, no combine/blend/dither; on a 16-bit
+            // target even x takes the high half, odd x the low half.
+            const auto [x0,y0,x1,y1]=raster_bounds(r);
+            if(y1>1024 || y0>1024)throw std::runtime_error("Raster height exceeds budget");
+            phase=1;
+            for(int y=y0;y<y1;++y) {
+                if(x1<=x0)continue;
+                const std::uint64_t row=r.target.address+std::uint64_t(y)*r.target.width*2;
+                int bx0=x0,bx1=x1;
+                if(band.low && band.low>row)bx0=int(std::min<std::uint64_t>(x1,std::max<std::uint64_t>(x0,(band.low-row+1)/2)));
+                if(band.high!=UINT64_MAX) {
+                    if(band.high<=row)continue;
+                    bx1=int(std::min<std::uint64_t>(x1,(band.high-row+1)/2));
+                }
+                for(int x=bx0;x<bx1;++x) {
+                    const std::uint64_t a=row+std::uint64_t(x)*2;
+                    if(a+2>ram.size())throw std::runtime_error("Framebuffer write outside RDRAM");
+                    const unsigned v=(x&1) ? (r.state.fill&0xffff) : (r.state.fill>>16);
+                    ram[a]=v>>8;ram[a+1]=v&255;
+                    if(!band.writes.empty() && std::uint64_t(band.writes.back().address)+band.writes.back().length==a)
+                        band.writes.back().length+=2;
+                    else band.writes.push_back({std::uint32_t(a),2});
+                    ++band.pixels;
+                }
+            }
+            continue;
+        }
         if(r.texture>=list.textures.size())throw std::runtime_error("Invalid DrawList texture reference");
         const auto& tex=list.textures[r.texture];unsigned cycle=r.state.other_hi>>20&3;
         if(cycle!=0 && cycle!=2)throw std::runtime_error("Only observed 1-cycle/COPY is implemented");

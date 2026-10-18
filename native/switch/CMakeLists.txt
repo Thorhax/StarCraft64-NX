@@ -64,6 +64,9 @@ target_link_libraries(sc64_scripts PUBLIC sc64_input)
       SC64_PRIVATE_ROOT="sdmc:/switch/StarCraft64"
       MA_ENABLE_ONLY_SPECIFIC_BACKENDS MA_ENABLE_NULL MA_NO_RUNTIME_LINKING)
   target_link_libraries(sc64_shell PUBLIC sc64_game sc64_gfx_core sc64_scripts librecomp ultramodern Threads::Threads)
+# Voiced briefings (native/shell/voices.cpp).
+target_sources(sc64_shell PRIVATE ${SC64_ROOT}/native/shell/voices.cpp)
+target_compile_definitions(sc64_shell PRIVATE SC64_VOICES=1)
 
   add_executable(sc64_switch ${CMAKE_CURRENT_SOURCE_DIR}/app.cpp)
   find_library(SC64_LIBNX nx PATHS /opt/devkitpro/libnx/lib "$ENV{DEVKITPRO}/libnx/lib" REQUIRED)
@@ -90,7 +93,7 @@ endif()
   find_program(SC64_NACPTOOL nacptool PATHS /opt/devkitpro/tools/bin REQUIRED)
   find_program(SC64_ELF2NRO elf2nro PATHS /opt/devkitpro/tools/bin REQUIRED)
   set(SC64_NACP "${CMAKE_CURRENT_BINARY_DIR}/StarCraft64.nacp")
-set(SC64_SWITCH_VERSION "1.2.0")
+set(SC64_SWITCH_VERSION "1.3.0")
 set(SC64_SWITCH_ICON "${SC64_ROOT}/local/icons/switch-icon.jpg")
 set(SC64_ICON_ARGUMENT "")
 if(EXISTS "${SC64_SWITCH_ICON}")
