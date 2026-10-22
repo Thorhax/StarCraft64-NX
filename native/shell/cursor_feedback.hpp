@@ -31,7 +31,8 @@ inline CursorFeedback read_cursor(std::span<const std::uint8_t> ram, std::uint64
     };
     auto half = [&](unsigned a) { return std::int16_t((unsigned(ram[a]) << 8) | ram[a+1]); };
     float x = std::bit_cast<float>(word(0xafdbc)), y = std::bit_cast<float>(word(0xafdc4));
-    if (!std::isfinite(x) || !std::isfinite(y) || x < 0 || x > 639 || y < 0 || y > 479
+    // Up to 1023: the widescreen mission image is up to 512 wide (widescreen.hpp).
+    if (!std::isfinite(x) || !std::isfinite(y) || x < 0 || x > 1023 || y < 0 || y > 479
         || std::abs(x - half(0xafdcc)) > 1 || std::abs(y - half(0xafdce)) > 1) return result;
     result.valid = true;
     result.x = x * .5f; result.y = y * .5f;

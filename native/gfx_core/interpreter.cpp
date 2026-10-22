@@ -35,10 +35,11 @@ public:
     ImageAddresses image_addresses;
     std::function<void()> checkpoint;
     std::uint64_t texture_bytes=0;
-    Interpreter(std::span<const std::uint8_t> ram,ImageAddresses addresses,
+    // Takes the snapshot by value: callers that own one move it in (no 8 MiB copy).
+    Interpreter(std::vector<std::uint8_t> ram,ImageAddresses addresses,
                 const std::function<void()>& poll = {}):image_addresses(addresses),checkpoint(poll) {
         if(ram.size()!=0x800000)throw std::runtime_error("Expected canonical 8 MiB RDRAM");
-        out.initial_ram.assign(ram.begin(),ram.end());
+        out.initial_ram=std::move(ram);
         out.limitations.push_back("D-029: RGB target reference only; hidden coverage and VI are not bit exact");
     }
     void poll() const { if(checkpoint)checkpoint(); }
@@ -318,7 +319,7 @@ public:
 };
 }
 DrawList interpret_rdp(std::span<const std::uint8_t> ram,std::span<const std::uint64_t> words) {
-    Interpreter parser(ram,ImageAddresses::Physical);
+    Interpreter parser(std::vector<std::uint8_t>(ram.begin(),ram.end()),ImageAddresses::Physical);
     for(unsigned i=0;i<words.size();++i) {
         parser.pc=i*8;auto v=words[i];unsigned op=(v>>56)&63;
         parser.out.opcodes[op]++;
@@ -329,7 +330,10 @@ DrawList interpret_rdp(std::span<const std::uint8_t> ram,std::span<const std::ui
     return std::move(parser.out);
 }
 DrawList interpret_gbi(std::span<const std::uint8_t> ram,unsigned root,const std::function<void()>& checkpoint) {
-    Interpreter parser(ram,ImageAddresses::Segmented,checkpoint);
+    return interpret_gbi(std::vector<std::uint8_t>(ram.begin(),ram.end()),root,checkpoint);
+}
+DrawList interpret_gbi(std::vector<std::uint8_t>&& ram,unsigned root,const std::function<void()>& checkpoint) {
+    Interpreter parser(std::move(ram),ImageAddresses::Segmented,checkpoint);
     unsigned pc=root&0x1fffffff;std::vector<unsigned> stack;
     for(unsigned steps=0;steps<100000;++steps) {
         parser.poll();

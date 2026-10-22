@@ -1,12 +1,15 @@
 #pragma once
 
 #include <array>
+#include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <mutex>
 #include <span>
+#include <thread>
 
 namespace sc64::runtime {
 // Publish bytes at path only after the pending image is written, synchronized
@@ -30,6 +33,14 @@ public:
     void read_dma(std::uint32_t offset, std::span<std::uint8_t> output);
     void write_dma(std::uint32_t offset, std::span<const std::uint8_t> input);
     std::array<std::uint8_t, capacity> snapshot() const;
+    // Deferred persistence: program/erase still complete at once in memory, and
+    // a writer thread publishes the whole image once commands have been quiet
+    // for `quiet`. One save programs hundreds of pages, each a full verified
+    // file write that costs tens of milliseconds on a Switch SD card.
+    void defer_writes(std::chrono::milliseconds quiet);
+    // Publishes any deferred image now and stops the writer.
+    void finish();
+    ~FlashDevice();
 private:
     enum class Mode { Array, Status, Silicon, Page };
     enum class Erase { None, Sector, Chip };
@@ -38,6 +49,8 @@ private:
     void write_locked(std::uint32_t offset, std::span<const std::uint8_t> input);
     void commit_locked(const std::array<std::uint8_t, capacity>& next);
     void require_initialized() const;
+    void writer_loop();
+    bool publish_pending(); // takes file_mutex_, then mutex_
     mutable std::mutex mutex_;
     std::array<std::uint8_t, capacity> data_{};
     std::array<std::uint8_t, page_size> page_{};
@@ -48,6 +61,13 @@ private:
     std::uint32_t sector_ = 0;
     bool pending_status_ = false;
     bool initialized_ = false;
+    // Deferred persistence (defer_writes): generations of the in-memory image.
+    std::mutex file_mutex_;
+    std::condition_variable writer_wake_;
+    std::thread writer_;
+    std::chrono::milliseconds quiet_{0};
+    std::uint64_t changed_ = 0, published_ = 0;
+    bool deferred_ = false, stopping_ = false;
 };
 FlashDevice& flash_device();
 }

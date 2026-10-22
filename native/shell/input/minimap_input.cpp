@@ -6,7 +6,7 @@ namespace {
 // Minimap bounds are half-open: x1/y1 lie outside.
 bool ready(const Info& info) {
     return info.running && !info.paused && info.input_active != false && mode_is(info, "game")
-        && info.width == 320 && info.height == 240 && info.minimap && fresh(info, info.cursor_field);
+        && info.width && info.height && mission_image(*info.width, *info.height) && info.minimap && fresh(info, info.cursor_field);
 }
 void request(GestureState& s, double x, double y, const Info& info) {
     s.minimap_request = MinimapRequest{x, y, info.minimap->context, info.cursor_field.value_or(0)};

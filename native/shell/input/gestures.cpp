@@ -13,7 +13,8 @@ void (*warp_cursor)(double, double) = nullptr;
 namespace {
 constexpr double pi = std::numbers::pi;
 double square(double v) { return v * v; }
-bool in_image(double x, double y) { return finite(x) && finite(y) && x >= 0 && x < 320 && y >= 0 && y < 240; }
+// The widest mission image (map_layout gates the actual one).
+bool in_image(double x, double y) { return finite(x) && finite(y) && x >= 0 && x < 512 && y >= 0 && y < 240; }
 // The modifier is held before the A edge and still held after its release:
 // the original copies R from held state before acting on A.
 Steps chord(unsigned modifier, unsigned bits) { return {{modifier, 4}, {modifier + bits, 8}, {modifier, 6}}; }

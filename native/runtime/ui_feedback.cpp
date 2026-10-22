@@ -14,6 +14,10 @@
 #include <cstdio>
 #include <string>
 
+// 1P widescreen controls (widescreen.hpp): the original 320x240 view by default.
+extern "C" { int sc64_ws_width = 320, sc64_ws_fog_width = 48, sc64_ws_cursor_max = 0x260, sc64_ws_command_x = 176,
+               sc64_ws_status_x = 86; }
+
 namespace {
 namespace guest = sc64::runtime::guest;
 struct FontItem { sc64::runtime::UiItem item; std::uint32_t pixels; };
@@ -71,14 +75,29 @@ std::uint32_t hint_pixels(const std::uint8_t* ram, std::uint32_t pixels,
 }
 }
 
+// Dialog activation (0x8001B8F8, apply_widescreen.py), before the rectangle at
+// +4 turns absolute. A dialog opened while the canvas is the widescreen mission
+// view keeps its place relative to the 320-wide layout: those nearer the right
+// edge stay as far from it, centred and free-standing ones move by half the
+// extra width, and those along the left edge stay.
+extern "C" void sc64_ws_dialog(std::uint8_t* ram, std::uint32_t dialog) {
+    if (!address(dialog,0x10) || half(ram,0x800a5af0)!=sc64_ws_width) return;
+    const int x=half(ram,dialog+4), w=half(ram,dialog+0xc);
+    const int left=x, right=320-(x+w), extra=sc64_ws_width-320;
+    int shift=0;
+    if (x>=0 && w>0 && right>=0)
+        shift=std::abs(left-right)<=8 ? extra/2 : right<left ? extra : left>64 ? extra/2 : 0;
+    if (shift) set_half(ram,dialog+4,x+shift);
+}
+
 sc64::runtime::MinimapInbox& sc64::runtime::minimap_input() {
     static MinimapInbox inbox;
     return inbox;
 }
 void sc64::runtime::set_minimap_handler(MinimapHandler handler) { minimap_handler=handler; }
 void sc64::runtime::request_cursor_warp(double x, double y) {
-    if (!(x >= 0 && x < 320 && y >= 0 && y < 240)) return;
-    const auto gx = std::min<std::uint64_t>(std::uint64_t(std::lround(x * 2)), 639);
+    if (!(x >= 0 && x < sc64_ws_width && y >= 0 && y < 240)) return;
+    const auto gx = std::min<std::uint64_t>(std::uint64_t(std::lround(x * 2)), 2 * sc64_ws_width - 1);
     const auto gy = std::min<std::uint64_t>(std::uint64_t(std::lround(y * 2)), 479);
     cursor_warp = (1ull << 32) | (gx << 16) | gy;
 }
@@ -139,7 +158,7 @@ extern "C" void sc64_ui_pick(std::uint8_t* ram, recomp_context* ctx, unsigned ki
                 if (pick.worker_selected && (flags(target)&0x2000)
                     && (target_owner==11 || target_owner==owner)) pick.buttons=0x4000;
             }
-            if (pick.x>=0 && pick.x<320 && pick.y>=0 && pick.y<240) observed=pick;
+            if (pick.x>=0 && pick.x<sc64_ws_width && pick.y>=0 && pick.y<240) observed=pick;
         }
     }
     std::lock_guard lock(mutex);
@@ -209,7 +228,7 @@ extern "C" void sc64_ui_hud_present(std::uint8_t* ram, recomp_context* ctx) {
     // The original fade-in also uses alpha 1..63; dimming does not disable a
     // controller command. A painted canvas owns its padding as well as labels.
     const float x=std::int32_t(ctx->r5), y=std::int32_t(ctx->r6);
-    if (x<0 || y<0 || x+136>320 || y+60>240) return;
+    if (x<0 || y<0 || x+136>sc64_ws_width || y+60>240) return;
     for (unsigned i=0; i<136*60; ++i) if (byte(ram,pixels+i)) {
         presented.hud_bounds=sc64::runtime::UiBounds{x,y,x+136,y+60,context};
         break;
@@ -221,7 +240,7 @@ extern "C" void sc64_ui_hud_present(std::uint8_t* ram, recomp_context* ctx) {
         auto item=font.item;
         item.x0+=std::int32_t(ctx->r5); item.x1+=std::int32_t(ctx->r5);
         item.y0+=std::int32_t(ctx->r6); item.y1+=std::int32_t(ctx->r6);
-        if (item.x0<0 || item.y0<0 || item.x1>320 || item.y1>240) continue;
+        if (item.x0<0 || item.y0<0 || item.x1>sc64_ws_width || item.y1>240) continue;
         if (presented.items.size()<64) presented.items.push_back(item);
     }
 }

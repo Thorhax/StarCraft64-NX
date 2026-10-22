@@ -41,6 +41,8 @@ public:
     // Called after drawing and before presenting; may read the window back.
     void after_render(const std::function<Readback()>& readback);
     bool visible() const { return scanout_visible_; }
+    // UI state of the presented frame (read-only; main thread).
+    const desktop::UiFeedback& ui() const { return ui_; }
     unsigned width() const { return width_; }
     unsigned height() const { return height_; }
     bool probing() const { return !probe_cases_.empty(); }

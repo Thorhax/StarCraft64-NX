@@ -245,7 +245,8 @@ std::optional<Point> to_native(const std::optional<Rect>& rect, double x, double
 namespace cursor_policy {
 std::optional<std::array<double, 4>> region(const Info& info, double w, double h, bool overlay) {
     if (!info.running || info.paused || !mode_is(info, "game") || !info.cursor_valid
-        || !fresh(info, info.cursor_field) || overlay || info.width != 320 || info.height != 240)
+        || !fresh(info, info.cursor_field) || overlay || !info.width || !info.height
+        || !mission_image(*info.width, *info.height))
         return std::nullopt;
     const auto rect = viewport::rectangle(w, h, *info.width, *info.height);
     if (!rect) return std::nullopt;

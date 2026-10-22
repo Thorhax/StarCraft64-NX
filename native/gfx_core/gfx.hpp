@@ -93,6 +93,9 @@ Color source_texel(std::span<const std::uint8_t> ram, const Image& image,
 // checks its captured SHA-1 before invoking this parser. Unknown operations fail.
 DrawList interpret_gbi(std::span<const std::uint8_t> ram, unsigned root,
                        const std::function<void()>& checkpoint = {});
+// Same, taking ownership of an 8 MiB snapshot as DrawList::initial_ram (no copy).
+DrawList interpret_gbi(std::vector<std::uint8_t>&& ram, unsigned root,
+                       const std::function<void()>& checkpoint = {});
 DrawList interpret_rdp(std::span<const std::uint8_t> ram, std::span<const std::uint64_t> words);
 struct SoftwareResult {
     std::vector<std::uint8_t> ram;
@@ -134,8 +137,20 @@ inline constexpr std::uint64_t parallel_raster_min_pixels = 4096;
 // ranges: every pixel reads and writes only its own address, so each range
 // replays all rectangles in order and the result is byte-identical to the
 // serial path. writes are canonical: sorted, merged byte ranges.
+//
+// recycled: an optional buffer of initial_ram's size from an earlier result.
+// Then only target_extents() are refreshed from initial_ram (no full 8 MiB
+// copy) and bytes outside them are stale; see target_extents for who may read.
 SoftwareResult render_software(const DrawList& list, const std::function<void()>& checkpoint = {},
-                               RasterPool* pool = nullptr);
+                               RasterPool* pool = nullptr, std::vector<std::uint8_t> recycled = {});
+// RDRAM bytes of a result that consumers read: each distinct target from its
+// address down to its lowest scissor row (the extent Native::tick exports),
+// clipped to initial_ram. Every rasterized pixel and RDP store lies inside them.
+std::vector<SoftwareResult::Write> target_extents(const DrawList& list);
+// Fill ram as the starting image of a render result: a full copy of
+// initial_ram, or, when ram already has its size (a recycled buffer), a copy of
+// target_extents() only.
+void prepare_result_ram(const DrawList& list, std::vector<std::uint8_t>& ram);
 std::vector<Batch> adjacent_batches(const DrawList& list);
 std::vector<std::uint8_t> target_rgba(std::span<const std::uint8_t> ram, Image image, unsigned height);
 // Native target comparison, prior to VI filtering; alpha is guest coverage, not

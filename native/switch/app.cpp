@@ -1,9 +1,14 @@
 // libnx application shell: framebuffer video, HID pads and touch screen.
 // Mirrors native/shell/app.cpp (SDL3) with the same Native/script objects; the
 // guest runtime, raster helpers and audio keep their own threads.
+#include "audio.hpp"
 #include "log.hpp"
 #include "native.hpp"
 #include "voices.hpp"
+#include "widescreen.hpp"
+#if defined(SC64_MOVIES)
+#include "movie.hpp"
+#endif
 #include "scripts.hpp"
 #include <switch.h>
 #if defined(SC64_SWITCH_GL)
@@ -107,6 +112,18 @@ void terminate_handler() {
     std::abort();
 }
 constexpr const char* storage_dir = "sdmc:/switch/StarCraft64";
+// The game's mix is quiet (menu music about -33 dBFS RMS, peaks -18 dBFS) next
+// to the PC voices/movies (-17/-13 dBFS RMS) and other Switch software: x4
+// (+12 dB) by default. sdmc:/switch/StarCraft64/volume holds another factor
+// (1 = original level).
+constexpr float default_volume = 4.0f;
+
+// An empty switch file in the storage folder; Windows often saves it as name.txt.
+bool option_file(const char* name) {
+    std::error_code missing;
+    const std::string path = std::string(storage_dir) + "/" + name;
+    return std::filesystem::exists(path, missing) || std::filesystem::exists(path + ".txt", missing);
+}
 
 // Original raster fitted with nearest sampling (320x240 and 640x480 -> 960x720),
 // centred: the same geometry as the shell's Fit viewport, so touch mapping matches.
@@ -171,6 +188,58 @@ constexpr std::array<ButtonBinding, 12> button_bindings = {{
 }};
 constexpr double analog_press = 0.5;
 
+#if defined(SC64_MOVIES)
+// PC cinematics (movies/*.smk, tools/voices/extract_movies.py from the user's own
+// CampnSC.dat / CampnBW.dat), played full screen while the game is suspended.
+constexpr const char* movie_dir = "sdmc:/switch/StarCraft64/movies/";
+// The Blizzard logo and PC intro replace the N64 opening animation. That
+// animation is the only scene scanned with VI X scale 512 / Y scale 716
+// (docs/research.md); Start during it reaches the main menu.
+constexpr std::array<const char*, 2> opening_movies = {"blizzard", "starintr"};
+constexpr unsigned start_hold = 8, start_hold_limit = 120, start_tries = 4; // main-loop frames
+// A repeated Start waits for the game itself to advance (graphics tasks), so a
+// slow guest cannot queue presses that would then select Single-Player.
+constexpr std::uint64_t start_seen_tasks = 2, start_retry_tasks = 60;
+bool opening_animation() {
+    const auto vi = sc64::desktop::session().scanout.latest();
+    return !vi.blank() && (vi.regs[12] & 0xfff) == 512 && (vi.regs[13] & 0xfff) == 716;
+}
+// Where the PC campaign shows its cinematics. Each Pre* clip is the location
+// title card that opens the cinematic after it. A "before" entry plays when the
+// N64 briefing of that PC mission starts (matched by voices.cpp); an episode
+// ending plays on the victory results screen of the episode's final mission.
+struct Cinematic { const char* mission; bool ending; std::array<const char*, 4> movies; };
+constexpr std::array<Cinematic, 15> cinematics = {{
+    {"Terran/terran02", false, {"preterran_1", "terran1"}},            // Mar Sara perimeter patrol
+    {"Terran/terran06", false, {"preterran_2", "terran2"}},            // the downing of Norad II
+    {"Terran/terran11", false, {"preterran_3", "terran3"}},            // assault on the Tarsonis platform
+    {"Terran/terran12", true, {"preterran_4", "terran4"}},             // coronation of Arcturus I
+    {"Zerg/zerg01", false, {"zerg1"}},                                 // the Overmind's vision
+    {"Zerg/zerg06", false, {"prezerg_2", "zerg2"}},                    // the Amerigo
+    {"Zerg/zerg09", false, {"prezerg_3", "zerg3", "prezerg_4", "zerg4"}}, // the warp from Char; Aiur
+    {"Protoss/protoss03", false, {"preprotoss_1", "protoss1"}},        // Fenix at Antioch
+    {"Protoss/protoss05", false, {"preprotoss_2", "protoss2"}},        // the recon camp on Char
+    {"Protoss/protoss07", false, {"preprotoss_3", "protoss3"}},        // the return to Aiur
+    {"Protoss/protoss10", true, {"protoss4"}},                         // the Overmind's end
+    {"EXPProtoss/protoss01", false, {"starxintr"}},                    // Brood War opening
+    {"EXPProtoss/protoss08", true, {"xprotoss"}},
+    {"EXPTerran/terran08", true, {"xterran"}},
+    {"EXPZerg/zerg10", true, {"xzerg"}},
+}};
+struct Cinema {
+    enum class State { idle, playing, leaving } state = State::idle;
+    std::vector<std::string> queue; // movies still to play in this showing
+    std::string name;
+    bool opening = false;           // afterwards Start ends the opening animation
+    bool armed = true, skip = false;
+    std::set<std::string> shown;    // campaign cinematics already played this session
+    std::uint64_t briefing_serial = 0, results_token = 0;
+    unsigned frames = 0, tries = 0;
+    std::uint64_t pressed_task = 0;
+    bool held = false;
+};
+#endif
+
 struct App {
     Config config;
     FrameVideo video;
@@ -189,6 +258,108 @@ struct App {
     u64 previous_buttons = 0;
     std::map<std::string, double> analog;
     std::map<s32, std::pair<double, double>> fingers; // id -> last screen position
+#if defined(SC64_MOVIES)
+    Cinema cinema;
+    bool movies = false;
+    u64 swallowed = 0; // buttons held when the movie ended
+
+    // Starts a showing of the movies that are installed; false when none plays.
+    template <typename Names> bool show(const std::string& name, const Names& names, bool opening) {
+        cinema.queue.clear();
+        for (const char* movie : names)
+            if (movie) cinema.queue.push_back(std::string(movie_dir) + movie + ".smk");
+        cinema.name = name;
+        if (!next_movie()) return false;
+        sc64::shell::log::info("movie: %s", name.c_str());
+        sc64::desktop::session().suspend(true);
+        cinema.state = Cinema::State::playing;
+        cinema.opening = opening;
+        cinema.skip = false;
+        return true;
+    }
+    bool next_movie() {
+        while (!cinema.queue.empty()) {
+            const std::string path = cinema.queue.front();
+            cinema.queue.erase(cinema.queue.begin());
+            std::error_code missing;
+            if (std::filesystem::exists(path, missing) && sc64::movie::start(path)) return true;
+            sc64::shell::log::warning("movie: %s not played", path.c_str());
+        }
+        return false;
+    }
+    // Main loop, after the game tick: starts, presents and ends cinematics.
+    void update_movies() {
+        using State = Cinema::State;
+        const bool animation = opening_animation();
+        switch (cinema.state) {
+        case State::idle: {
+            if (!animation) cinema.armed = true;
+            if (!movies) return;
+            if (animation && cinema.armed) {
+                cinema.armed = false;
+                if (show("opening replaces the N64 opening animation", opening_movies, true)) return;
+            }
+            const auto briefing = sc64::voices::last_briefing();
+            const auto& ui = native->ui();
+            const bool won = ui.mode == "results" && ui.victory.value_or(false);
+            if (ui.mode != "results") cinema.results_token = 0;
+            const bool new_briefing = briefing.serial != cinema.briefing_serial;
+            const bool new_victory = won && ui.token != cinema.results_token;
+            cinema.briefing_serial = briefing.serial;
+            if (won) cinema.results_token = ui.token;
+            for (const auto& entry : cinematics) {
+                if (briefing.mission != entry.mission || !(entry.ending ? new_victory : new_briefing)) continue;
+                const std::string name = std::string(entry.ending ? "after winning " : "before ") + entry.mission;
+                if (!cinema.shown.insert(name).second) continue; // once per session
+                if (show(name, entry.movies, false)) return;
+            }
+            return;
+        }
+        case State::playing:
+            if (const auto frame = sc64::movie::update())
+                video.upload(Native::Upload{frame->rgba, frame->width, frame->height});
+            if (!cinema.skip && !sc64::movie::finished()) return;
+            sc64::movie::stop();
+            if (!cinema.skip && next_movie()) return; // the next movie of this showing
+            cinema.queue.clear();
+            sc64::desktop::session().suspend(false);
+            swallowed = previous_buttons;
+            if (!cinema.opening) { cinema.state = State::idle; return; }
+            // Leave the animation the original way: Start reaches the main menu.
+            cinema.state = State::leaving;
+            cinema.frames = 0; cinema.tries = 0;
+            cinema.pressed_task = sc64::desktop::session().tasks.load();
+            cinema.held = true;
+            action("start", true);
+            return;
+        case State::leaving: {
+            ++cinema.frames;
+            const std::uint64_t advanced = sc64::desktop::session().tasks.load() - cinema.pressed_task;
+            // Held until the game has run long enough to poll it (or a stalled one gives up).
+            if (cinema.held && cinema.frames >= start_hold
+                && (advanced >= start_seen_tasks || cinema.frames >= start_hold_limit)) {
+                action("start", false);
+                cinema.held = false;
+            }
+            if (cinema.held) return;
+            if (!animation) { cinema.state = State::idle; return; }
+            if (advanced >= start_retry_tasks) {
+                if (++cinema.tries >= start_tries) {
+                    sc64::shell::log::warning("movie: the opening animation did not end on Start");
+                    cinema.state = State::idle;
+                    return;
+                }
+                cinema.frames = 0;
+                cinema.pressed_task = sc64::desktop::session().tasks.load();
+                cinema.held = true;
+                action("start", true);
+            }
+            return;
+        }
+        }
+    }
+    bool movie_playing() const { return cinema.state == Cinema::State::playing; }
+#endif
 
     void dispatch(const InputEvent& event) {
         if (!gui->on_input(event.id, event) && event.id) host->on_input(*event.id, event);
@@ -218,8 +389,29 @@ struct App {
         padUpdate(&pad);
         const u64 buttons = padGetButtons(&pad);
         const u64 changed = buttons ^ previous_buttons;
+#if defined(SC64_MOVIES)
+        if (movie_playing()) { // A, B, + or a touch skips; nothing reaches the game
+            constexpr u64 skip = HidNpadButton_A | HidNpadButton_B | HidNpadButton_Plus;
+            if (changed & buttons & skip) cinema.skip = true;
+            previous_buttons = buttons;
+            HidTouchScreenState state{};
+            std::map<s32, std::pair<double, double>> now;
+            if (hidGetTouchScreenStates(&state, 1))
+                for (s32 i = 0; i < state.count && i < 16; ++i)
+                    now[s32(state.touches[i].finger_id)] = {double(state.touches[i].x), double(state.touches[i].y)};
+            for (const auto& touch : now) if (!fingers.contains(touch.first)) cinema.skip = true;
+            fingers = std::move(now);
+            return;
+        }
+        // Buttons held through the end of the movie stay silent until released,
+        // so a skip press cannot cut short the Start sent to the game.
+        const u64 quiet = changed & swallowed;
+        swallowed &= buttons;
+#else
+        constexpr u64 quiet = 0;
+#endif
         for (const auto& binding : button_bindings)
-            if (changed & binding.button) action(binding.action, (buttons & binding.button) != 0);
+            if (changed & ~quiet & binding.button) action(binding.action, (buttons & binding.button) != 0);
         previous_buttons = buttons;
         auto axis = [&](const HidAnalogStickState& s, const char* left, const char* right,
                         const char* up, const char* down) {
@@ -273,18 +465,18 @@ int main(int argc, char* argv[]) {
         // ROM read in place from the SD card (platform.cpp); no private copy.
         app->config.set("sc64.bundled_rom", "1");
 #if defined(SC64_SWITCH_GL)
-        app->use_gl = !std::filesystem::exists("sdmc:/switch/StarCraft64/nogl") && app->gl.create();
+        app->use_gl = !option_file("nogl") && app->gl.create();
         // GPU rasterization (sdmc:/switch/StarCraft64/softraster keeps it on the CPU;
         // .../glcheck renders both ways and logs differences).
         if (app->use_gl && app->gl.raster_ready()
-            && !std::filesystem::exists("sdmc:/switch/StarCraft64/softraster")) {
+            && !option_file("softraster")) {
             auto* device = &app->gl;
             sc64::desktop::session().gpu_render = [device](const sc64::gfx::DrawList& list,
                                                           sc64::gfx::SoftwareResult& out,
                                                           const std::function<void()>& service) {
                 return device->render(list, out, service);
             };
-            sc64::desktop::session().gpu_check = std::filesystem::exists("sdmc:/switch/StarCraft64/glcheck");
+            sc64::desktop::session().gpu_check = option_file("glcheck");
         }
         // GL only rasterizes; presentation stays on the libnx framebuffer.
         app->use_gl = false;
@@ -293,6 +485,12 @@ int main(int argc, char* argv[]) {
         auto* raw = app.get();
         // Graphics tasks run on the Gfx thread while the game continues (like the RCP).
         sc64::desktop::session().async_graphics = true;
+        // Every cheat on the Cheats page from the start (sdmc:/switch/StarCraft64/lockcheats keeps the original unlocks).
+        sc64::desktop::session().unlock_cheats = !option_file("lockcheats");
+        // Experimental 16:9 missions (416x240, 3x = 1248x720): sdmc:/switch/StarCraft64/widescreen.
+        if (option_file("widescreen")) sc64::runtime::set_widescreen(416);
+        sc64::shell::log::info(option_file("widescreen") ? "widescreen: 416x240 missions"
+                                                         : "widescreen: off (no widescreen file)");
         app->native = std::make_unique<Native>(app->config, Native::Window{
             [] { return std::pair<double, double>(screen_w, screen_h); },
             [raw](int code) { raw->exit_code = code; },
@@ -300,6 +498,26 @@ int main(int argc, char* argv[]) {
         app->native->initialize();
         // Voiced briefings from the user's own PC files (tools/voices/extract_briefings.py).
         sc64::voices::initialize(std::string(storage_dir) + "/voices");
+        {
+            float volume = default_volume;
+            if (FILE* f = std::fopen("sdmc:/switch/StarCraft64/volume", "r")) {
+                float value = 0;
+                if (std::fscanf(f, "%f", &value) == 1 && value >= 0) volume = value;
+                std::fclose(f);
+            }
+            sc64::desktop::audio::set_game_gain(volume);
+            sc64::shell::log::info("audio: game volume x%.2f", volume);
+        }
+#if defined(SC64_MOVIES)
+        {
+            std::error_code ignored;
+            unsigned installed = 0;
+            for (const auto& entry : std::filesystem::directory_iterator(movie_dir, ignored))
+                if (entry.path().extension() == ".smk") ++installed;
+            app->movies = installed && !option_file("nomovies");
+            sc64::shell::log::info("movie: %u movies installed, %s", installed, app->movies ? "enabled" : "disabled");
+        }
+#endif
         app->layouts = std::make_unique<FileLayoutStore>(std::filesystem::path(app->native->storage())
                                                          / "touch-layout-v2.json");
         app->host = std::make_unique<HostScript>(app->shared, *app->native, app->config);
@@ -320,15 +538,24 @@ int main(int argc, char* argv[]) {
 #if defined(SC64_SWITCH_GL)
                 if (app->use_gl) app->gl.upload(*upload); else
 #endif
+#if defined(SC64_MOVIES)
+                if (!app->movie_playing())
+#endif
                 app->video.upload(*upload);
             }
+#if defined(SC64_MOVIES)
+            app->update_movies();
+            const bool visible = app->movie_playing() || app->native->visible();
+#else
+            const bool visible = app->native->visible();
+#endif
             app->host->update(dt);
             app->gui->update(dt);
             app->status->update();
 #if defined(SC64_SWITCH_GL)
-            if (app->use_gl) app->gl.draw(app->native->visible()); else
+            if (app->use_gl) app->gl.draw(visible); else
 #endif
-            app->video.draw(app->native->visible());
+            app->video.draw(visible);
             app->native->after_render([] { return Readback{}; });
         }
         if (app->exit_code) result = *app->exit_code;
@@ -336,6 +563,9 @@ int main(int argc, char* argv[]) {
         sc64::shell::log::error("SC64 Switch: %s", error.what());
         result = 1;
     }
+#if defined(SC64_MOVIES)
+    sc64::movie::stop();
+#endif
     if (app->gui) app->gui->final();
     if (app->host) app->host->final();
     if (app->native) app->native->finalize();

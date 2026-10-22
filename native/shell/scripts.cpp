@@ -670,8 +670,8 @@ void GuiScript::update_buttons(std::optional<std::string_view> active, const Inf
             nodes[button.frame].enabled = show; nodes[button.fill].enabled = show;
             for (const auto glyph : button.glyph) nodes[glyph].enabled = show;
             if (!show) continue;
-            // Buttons are laid out in 320x240 units of the displayed image.
-            const double unit = rect->nw / 320;
+            // Buttons are laid out in 320x240 units from the displayed image's corner.
+            const double unit = rect->nh / 240;
             const double kx = rect->width / rect->nw * w / sw * unit, ky = rect->height / rect->nh * h / sh * unit;
             const double size = hud_buttons::size;
             const double left = (rect->x + def.x0 * kx * sw / w) * w / sw;

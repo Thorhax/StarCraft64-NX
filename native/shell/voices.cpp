@@ -5,6 +5,7 @@
 #include <condition_variable>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string_view>
@@ -63,7 +64,19 @@ struct Mission {
 std::vector<Mission> missions;
 std::string language_root;
 double sample_step = 0.5; // source samples per 48 kHz output sample
-bool enabled = false;
+bool enabled = false;  // briefing matching (the enUS index is installed)
+bool playback = true;  // voice playback (false with novoices)
+std::mutex briefing_mutex;
+Briefing briefing;
+
+// ---- In-mission transmissions (ingame.json, tools/voices/extract_ingame_voices.py)
+constexpr std::uint32_t message_id_address = 0x800b03d8;   // advisor/transmission box, 0xFFFF when closed
+constexpr std::uint32_t message_text_address = 0x800b03e0; // -> the text it shows
+constexpr double line_threshold = 0.6;
+struct Line { Words words; std::string file; };
+std::map<std::string, std::vector<Line>> ingame; // by PC mission key
+std::string ingame_root;
+std::uint32_t shown_text = 0;
 
 // ---- Briefing state (guest thread only)
 std::uint32_t script_ptr = 0;
@@ -215,6 +228,11 @@ void match(const std::uint8_t* ram) {
         mission = -1;
         return;
     }
+    {
+        std::lock_guard lock(briefing_mutex);
+        briefing.mission = missions[mission].key;
+        ++briefing.serial;
+    }
     std::string pages_text;
     for (int t : page_transmission) pages_text += " " + std::to_string(t);
     sc64::shell::log::info("voices: briefing matched %s (score %.2f), pages ->%s",
@@ -240,9 +258,10 @@ bool campaign_key(const std::string& key) {
 void initialize(const std::string& root) {
     namespace fs = std::filesystem;
     std::error_code ignored;
-    if (fs::exists(fs::path(root).parent_path() / "novoices", ignored)) {
-        sc64::shell::log::info("voices: disabled (novoices)");
-        return;
+    if (fs::exists(fs::path(root).parent_path() / "novoices", ignored)
+        || fs::exists(fs::path(root).parent_path() / "novoices.txt", ignored)) {
+        sc64::shell::log::info("voices: playback disabled (novoices); briefings are still matched");
+        playback = false;
     }
     std::string language = "enUS";
     if (std::ifstream file(fs::path(root) / "language"); file) {
@@ -279,15 +298,32 @@ void initialize(const std::string& root) {
         missions.clear();
         return;
     }
+    // In-mission voices exist in English only (the N64 text is English).
+    try {
+        if (std::ifstream lines_file(fs::path(root) / "enUS" / "ingame.json"); lines_file) {
+            const auto lines = nlohmann::json::parse(lines_file);
+            std::size_t count = 0;
+            for (const auto& [key, entries] : lines.at("missions").items())
+                for (const auto& entry : entries) {
+                    ingame[key].push_back({tokenize(entry.value("text", "")), entry.value("file", "")});
+                    ++count;
+                }
+            ingame_root = (fs::path(root) / "enUS").string();
+            sc64::shell::log::info("voices: %zu in-mission transmissions", count);
+        }
+    } catch (const std::exception& error) {
+        sc64::shell::log::warning("voices: ingame.json: %s", error.what());
+        ingame.clear();
+    }
     enabled = !missions.empty();
-    if (enabled) {
+    if (enabled && playback) {
 #if defined(__SWITCH__)
         // libnx thread: std::thread construction terminated the process here.
         static Thread loader_thread;
         if (R_FAILED(threadCreate(&loader_thread, [](void*) { loader(); }, nullptr, nullptr, 0x40000, 0x2C, -2))
             || R_FAILED(threadStart(&loader_thread))) {
             sc64::shell::log::warning("voices: loader thread failed, briefings stay silent");
-            enabled = false;
+            playback = false;
             return;
         }
 #else
@@ -300,7 +336,7 @@ void initialize(const std::string& root) {
 void observe(const std::uint8_t* ram, bool active) {
     if (!enabled) return;
     if (!active) {
-        if (script_ptr) stop();
+        if (script_ptr && playback) stop();
         script_ptr = 0; mission = -1; last_page = -1; playing = -1;
         return;
     }
@@ -316,15 +352,49 @@ void observe(const std::uint8_t* ram, bool active) {
     last_page = page;
     const int transmission = mission >= 0 && page >= 0 && page < int(page_transmission.size())
                              ? page_transmission[page] : -1;
-    if (transmission == playing) return; // same speaker continues on the next page
+    if (transmission == playing || !playback) return; // same speaker continues on the next page
     playing = transmission;
     const std::string& file = transmission >= 0 ? missions[mission].files[transmission] : std::string();
     if (file.empty()) stop();
     else play(language_root + "/" + file);
 }
 
+void observe_messages(const std::uint8_t* ram) {
+    if (ingame.empty() || !playback) return;
+    if ((word(ram, message_id_address) & 0xffff) == 0xffff) { shown_text = 0; return; } // the voice plays on
+    const std::uint32_t text = word(ram, message_text_address);
+    if (text == shown_text || text < 0x80000000 || text >= 0x80800000) return;
+    shown_text = text;
+    std::string message;
+    for (std::uint32_t i = 0; i < 1024; ++i) {
+        const char c = char(ram[((text + i) & 0x7fffff) ^ 3]);
+        if (c == 0) break;
+        message.push_back(c);
+    }
+    const Words words = tokenize(message);
+    const std::string mission = last_briefing().mission;
+    // The briefed mission first; a mission loaded from a save searches them all.
+    const Line* best = nullptr;
+    double best_score = 0;
+    auto search = [&](const std::vector<Line>& lines) {
+        for (const auto& line : lines)
+            if (const double score = overlap(words, line.words); score > best_score) { best_score = score; best = &line; }
+    };
+    if (const auto it = ingame.find(mission); it != ingame.end()) search(it->second);
+    if (best_score < line_threshold)
+        for (const auto& [key, lines] : ingame) search(lines);
+    if (!best || best_score < line_threshold) return; // advisor hints and objectives have no voice
+    sc64::shell::log::info("voices: transmission %s (score %.2f)", best->file.c_str(), best_score);
+    play(ingame_root + "/" + best->file);
+}
+
+Briefing last_briefing() {
+    std::lock_guard lock(briefing_mutex);
+    return briefing;
+}
+
 void mix(float* stereo, unsigned frames) {
-    if (!enabled) return;
+    if (!enabled || !playback) return;
     std::lock_guard lock(audio_mutex);
     const auto current = voice;
     const float target = current ? music_duck : 1.0f;

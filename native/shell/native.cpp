@@ -4,6 +4,7 @@
 #include "platform.hpp"
 #include "sha.hpp"
 #include "../runtime/minimap.hpp"
+#include "../runtime/widescreen.hpp"
 #include <algorithm>
 #include <cmath>
 #include <fstream>
@@ -104,7 +105,7 @@ void Native::update_cursor() {
     }
     system_cursor_hidden_ = sc64_update_mouse_cursor(cursor_requested_ && !inactive_ && !iconified_
         && s.running && !s.paused && ui_.mode == "game" && cursor_.valid && fresh
-        && scanout_visible_ && width_ == 320 && height_ == 240, cursor_region_,
+        && scanout_visible_ && width_ == unsigned(sc64_ws_width) && height_ == 240, cursor_region_,
         hud_region ? &*hud_region : nullptr, minimap_region ? &*minimap_region : nullptr);
 }
 
@@ -336,7 +337,7 @@ void Native::finalize() {
 input::Info Native::info() {
     auto& s = session();
     input::Info info;
-    const bool native_layout = scanout_visible_ && width_ == 320 && height_ == 240;
+    const bool native_layout = scanout_visible_ && width_ == unsigned(sc64_ws_width) && height_ == 240;
     info.fields = double(s.fields.load());
     info.running = s.running; info.paused = s.paused;
     info.input_active = pause_policy_.input_active() && !s.paused.load();
@@ -475,7 +476,7 @@ bool Native::navigate_minimap(double x, double y, double context, double source_
         && std::isfinite(source_field) && source_field >= 0 && source_field <= double(field)
         && double(field) - source_field <= 12 && cursor_.minimap
         && cursor_.minimap->context == context && cursor_.minimap->contains(x, y)
-        && source_field == double(cursor_.field) && scanout_visible_ && width_ == 320 && height_ == 240
+        && source_field == double(cursor_.field) && scanout_visible_ && width_ == unsigned(sc64_ws_width) && height_ == 240
         && ui_.mode == "game" && pause_policy_.input_active() && s.running && !s.paused;
     if (valid) runtime::minimap_input().submit({x, y, std::uint32_t(context), std::uint64_t(source_field)});
     return valid;

@@ -14,4 +14,11 @@ void initialize(const std::string& root);
 void observe(const std::uint8_t* ram, bool active);
 // Audio thread: adds the voice to interleaved stereo float (48 kHz) and ducks the rest.
 void mix(float* stereo, unsigned frames);
+// Guest thread, every graphics task: plays the PC voice of a transmission box
+// as it opens (matched by its text; ingame.json). Closing the box lets it finish.
+void observe_messages(const std::uint8_t* ram);
+// Any thread: the PC campaign mission ("Terran/terran06") of the latest briefing
+// matched, and a serial bumped by every match. Matching also runs with novoices.
+struct Briefing { std::string mission; std::uint64_t serial = 0; };
+Briefing last_briefing();
 }

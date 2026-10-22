@@ -69,8 +69,15 @@ int main() {
         info.paused = old;
     }
     {
-        const auto old = info.width; info.width = 512; tick(150);
+        // Split screen (512x384) has no verified button layout.
+        const auto old_w = info.width, old_h = info.height; info.width = 512; info.height = 384; tick(150);
         CHECK(!buttons::set(info) && !pointer("1", down, 8, 8, true));
+        info.width = old_w; info.height = old_h;
+    }
+    {
+        // The widescreen mission image keeps the buttons.
+        const auto old = info.width; info.width = 416; tick(150);
+        CHECK(buttons::set(info) == std::optional<std::string_view>("game"));
         info.width = old;
     }
     {

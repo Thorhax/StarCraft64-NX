@@ -3,7 +3,8 @@
 
 Chains the documented Stage 1 steps: patch and build N64Recomp, analyze the ROM
 (prepare.py), add the guarded UI observers (add_ui_hooks.py), generate C
-(run_recompiler.py --replace) and validate the observers the shell build
+(run_recompiler.py --replace), validate the observers, then add the runtime
+widescreen switch (apply_widescreen.py). The observers are what the shell build
 requires. The libultra inventory is a prepared input (see docs/libultra-inventory.md);
 it is verified, never rebuilt here. Run with the Python that has spimdisasm
 (the Makefile uses .venv/bin/python). All outputs stay under ignored local/.
@@ -115,6 +116,7 @@ def main() -> None:
     run("generate game C", [sys.executable, TOOLS / "run_recompiler.py", analysis / "sc64-ui.toml",
                             "--recompiler", RECOMPILER_BINARY, "--output", output, "--replace"])
     run("validate observers", [sys.executable, ROOT / "tools/desktop/game_validation.py", output])
+    run("add widescreen switch", [sys.executable, TOOLS / "apply_widescreen.py", output])
     log.info("PASS: %s ready for `make build`; analysis kept in %s", output, analysis)
 
 

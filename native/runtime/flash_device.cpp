@@ -134,6 +134,12 @@ void FlashDevice::initialize(const std::filesystem::path& path, Trace trace) {
 }
 
 void FlashDevice::commit_locked(const std::array<std::uint8_t, capacity>& next) {
+    if (deferred_) {
+        data_ = next;
+        ++changed_;
+        writer_wake_.notify_one();
+        return;
+    }
     atomic_write(path_, next, {});
     // The complete image is published; keep memory equal to it even if the
     // directory sync then reports that its durability is unconfirmed.
@@ -252,6 +258,70 @@ std::array<std::uint8_t, FlashDevice::capacity> FlashDevice::snapshot() const {
     require_initialized();
     return data_;
 }
+
+void FlashDevice::defer_writes(std::chrono::milliseconds quiet) {
+    std::lock_guard lock(mutex_);
+    if (deferred_) return;
+    quiet_ = quiet;
+    deferred_ = true;
+    stopping_ = false;
+    writer_ = std::thread([this] { writer_loop(); });
+}
+
+bool FlashDevice::publish_pending() {
+    std::lock_guard file(file_mutex_);
+    std::array<std::uint8_t, capacity> image;
+    std::uint64_t generation;
+    {
+        std::lock_guard lock(mutex_);
+        if (changed_ == published_) return true;
+        image = data_;
+        generation = changed_;
+    }
+    try {
+        atomic_write(path_, image, {});
+        sync_parent_directory(path_);
+    } catch (const std::exception& error) {
+        std::fprintf(stderr, "FlashRAM save not written: %s\n", error.what());
+        return false;
+    }
+    std::lock_guard lock(mutex_);
+    published_ = std::max(published_, generation);
+    return true;
+}
+
+void FlashDevice::writer_loop() {
+    std::unique_lock lock(mutex_);
+    while (!stopping_) {
+        writer_wake_.wait(lock, [&] { return stopping_ || changed_ != published_; });
+        if (stopping_) break;
+        // Let the game's save burst finish before writing the file once.
+        for (auto seen = changed_; !stopping_; seen = changed_) {
+            writer_wake_.wait_for(lock, quiet_);
+            if (changed_ == seen) break;
+        }
+        if (stopping_) break;
+        lock.unlock();
+        const bool written = publish_pending();
+        lock.lock();
+        if (!written) writer_wake_.wait_for(lock, std::chrono::seconds(2), [&] { return stopping_; });
+    }
+}
+
+void FlashDevice::finish() {
+    {
+        std::lock_guard lock(mutex_);
+        if (!deferred_) return;
+        stopping_ = true;
+    }
+    writer_wake_.notify_one();
+    if (writer_.joinable()) writer_.join();
+    publish_pending();
+    std::lock_guard lock(mutex_);
+    deferred_ = false;
+}
+
+FlashDevice::~FlashDevice() { finish(); }
 
 FlashDevice& flash_device() { static FlashDevice instance; return instance; }
 }

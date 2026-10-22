@@ -33,7 +33,7 @@ inline std::optional<MinimapProfile> read_minimap(std::span<const std::uint8_t> 
     if (p.x0<0 || p.y0<0 || p.x1>=320 || p.y1>=240 || p.x1<=p.x0 || p.y1<=p.y0
         || p.width<1 || p.height<1 || p.width>320 || p.height>240
         || p.multiplier<1 || p.multiplier>512 || p.shift<0 || p.shift>10
-        || p.divisor<1 || p.divisor>512 || p.viewport_w<1 || p.viewport_w>640
+        || p.divisor<1 || p.divisor>512 || p.viewport_w<1 || p.viewport_w>1024 // widescreen: up to 2x512
         || p.viewport_h<1 || p.viewport_h>480) return {};
     // Fence a queued click against a different mission/map geometry.
     std::uint32_t hash=2166136261u;

@@ -352,8 +352,30 @@ void raster_band(const DrawList& list,std::vector<std::uint8_t>& ram,Band& band,
     }
 }
 }
-SoftwareResult render_software(const DrawList& list, const std::function<void()>& checkpoint, RasterPool* pool) {
-    SoftwareResult result{list.initial_ram,0,{}};
+std::vector<SoftwareResult::Write> target_extents(const DrawList& list) {
+    std::vector<std::pair<Image,int>> targets; // target, lowest scissor row
+    for(const auto& r:list.rectangles) {
+        auto it=std::find_if(targets.begin(),targets.end(),[&](const auto& t){return t.first==r.target;});
+        if(it==targets.end())targets.push_back({r.target,0}),it=targets.end()-1;
+        it->second=std::max(it->second,std::max(0,r.state.scissor.y1/4));
+    }
+    const std::uint64_t size=list.initial_ram.size();
+    std::vector<SoftwareResult::Write> out;
+    for(const auto& [image,rows]:targets) {
+        const std::uint64_t begin=image.address,end=std::min(size,begin+std::uint64_t(image.width)*2*unsigned(rows));
+        if(begin<end)out.push_back({std::uint32_t(begin),std::uint32_t(end-begin)});
+    }
+    return out;
+}
+void prepare_result_ram(const DrawList& list, std::vector<std::uint8_t>& ram) {
+    if(ram.size()!=list.initial_ram.size()){ram=list.initial_ram;return;}
+    for(const auto& e:target_extents(list))
+        std::copy_n(list.initial_ram.begin()+e.address,e.length,ram.begin()+e.address);
+}
+SoftwareResult render_software(const DrawList& list, const std::function<void()>& checkpoint, RasterPool* pool,
+                               std::vector<std::uint8_t> recycled) {
+    SoftwareResult result{std::move(recycled),0,{}};
+    prepare_result_ram(list,result.ram);
     std::atomic<unsigned> first_error{UINT_MAX};
     // Parallel ranges need pixel-aligned (even) targets so no two ranges share
     // a byte, and enough work to outweigh dispatch.

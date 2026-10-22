@@ -13,6 +13,9 @@
 #if defined(SC64_VOICES)
 #include "voices.hpp"
 #endif
+#if defined(SC64_MOVIES)
+#include "movie.hpp"
+#endif
 #if defined(__SWITCH__)
 #include <switch.h>
 #include <cstdlib>
@@ -107,9 +110,28 @@ void retire() {
     auto now = session().clock.now();
     while (!dma_ends.empty() && dma_ends.front() <= now) dma_ends.pop_front();
 }
+std::atomic<float> game_gain{1.0f};
+void mix_sources(float* dst, ma_uint32 frames);
+// The game's own PCM is mixed far below the PC voices and movies, so only it is
+// amplified (mix_sources). Above the knee a soft limiter bends peaks of the
+// whole mix toward full scale instead of clipping them.
 void mix(float* dst, ma_uint32 frames) {
+    mix_sources(dst, frames);
+    if (game_gain.load(std::memory_order_relaxed) == 1.0f) return;
+    constexpr float knee = 0.7f;
+    for (std::size_t i = 0; i < std::size_t(frames) * 2; ++i) {
+        const float x = dst[i], magnitude = std::fabs(x);
+        if (magnitude > knee) dst[i] = std::copysign(knee + (1 - knee) * std::tanh((magnitude - knee) / (1 - knee)), x);
+    }
+}
+void mix_sources(float* dst, ma_uint32 frames) {
     std::fill_n(dst, frames * 2, 0.0f);
-    if (session().paused.load()) return;
+    if (session().paused.load()) {
+#if defined(SC64_MOVIES)
+        sc64::movie::mix(dst, frames); // the guest is suspended while a movie plays
+#endif
+        return;
+    }
     auto apply = [&](std::uint64_t state) {
         if (state != applied_stream) { pcm.clear(); applied_stream = state; }
     };
@@ -131,6 +153,8 @@ void mix(float* dst, ma_uint32 frames) {
     const auto field = session().fields.load();
     if (tracing(field)) output_trace.append({field,applied_stream,trace_seconds(),pcm.correction(),
         0,0,48000,result.played,result.starved},frames,[&](std::size_t i) { return dst[i]; });
+    if (const float gain = game_gain.load(std::memory_order_relaxed); gain != 1.0f)
+        for (std::size_t i = 0; i < std::size_t(frames) * 2; ++i) dst[i] *= gain;
     if (result.starved) ++underrun_count;
     if (result.waiting) ++wait_count;
     played_count += result.played; nonzero_count += result.nonzero;
@@ -199,6 +223,7 @@ Timing take_timing() {
         source_frames.load(), source_nonzero_frames.load()};
 }
 void pause_changed() { timing_epoch.fetch_add(1, std::memory_order_relaxed); }
+void set_game_gain(float gain) { game_gain.store(std::clamp(gain, 0.0f, 16.0f), std::memory_order_relaxed); }
 void configure(const char* requested) {
     if (initialized) throw std::runtime_error("Configure the audio backend before starting the device");
     const std::string_view name=requested;

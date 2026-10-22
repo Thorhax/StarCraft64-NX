@@ -12,6 +12,9 @@ struct Timing {
 };
 Timing take_timing();
 void pause_changed();
+// Gain of the game's own sound (1 = original); voices and movies keep their
+// level, and peaks of the mix are soft-limited.
+void set_game_gain(float gain);
 void menu_profile(bool menu);
 void initialize();
 void shutdown();

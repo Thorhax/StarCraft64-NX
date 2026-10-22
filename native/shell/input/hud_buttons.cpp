@@ -49,7 +49,7 @@ const std::array<Set, 2>& sets() { return button_sets; }
 
 std::optional<std::string_view> set(const Info& info) {
     if (!live(info)) return std::nullopt;
-    if (mode_is(info, "game") && info.width == 320 && info.height == 240) return "game";
+    if (mode_is(info, "game") && info.width && info.height && mission_image(*info.width, *info.height)) return "game";
     if (mode_is(info, "menu") && info.ui_token == encyclopedia_token && info.width == 640 && info.height == 480)
         return "encyclopedia";
     return std::nullopt;
@@ -66,7 +66,7 @@ PointerResult pointer(GestureState& s, const ContactId& id, Phase phase, double 
     }
     const Def* b = nullptr;
     if (current) {
-        const double k = 320 / *info.width;
+        const double k = 240 / *info.height; // 320x240 units from the image's top-left
         b = hit(*current, x * k, y * k);
     }
     if (!s.hud_button) {

@@ -75,11 +75,14 @@ inline bool fresh(const Info& info, std::optional<double> source, double missing
     return age >= 0 && age <= max_feedback_age;
 }
 inline bool fresh_ui(const Info& info) { return fresh(info, info.ui_field); }
+// The one-player mission image: 320x240, or up to 512x240 with the widescreen
+// option (widescreen.hpp), which keeps the same 2:1 cursor and camera units.
+inline bool mission_image(double width, double height) { return height == 240 && width >= 320 && width <= 512; }
 // Map gestures, group commands and the cursor transform are verified only for
-// the 320x240 one-player mission image (research.md, D-042). Fixtures that
-// omit dimensions describe that layout.
+// the one-player mission image (research.md, D-042). Fixtures that omit
+// dimensions describe that layout.
 inline bool map_layout(const Info& info) {
-    return !info.width || (*info.width == 320 && info.height && *info.height == 240);
+    return !info.width || (info.height && mission_image(*info.width, *info.height));
 }
 inline bool mode_is(const Info& info, const char* mode) { return info.ui_mode && *info.ui_mode == mode; }
 // Lua's floored modulo, used for ring and grid arithmetic.

@@ -46,6 +46,9 @@ target_include_directories(sc64_shell PUBLIC "${SC64_ROOT}/native/shell" "${SC64
 target_compile_definitions(sc64_shell PUBLIC SC64_SDL_VERSION="3.4.18")
 target_link_libraries(sc64_shell PUBLIC sc64_game sc64_gfx_core sc64_scripts sc64_sha librecomp ultramodern
     SDL3::SDL3-static Threads::Threads)
+# Voiced briefings and transmissions (native/shell/voices.cpp), from <storage>/voices.
+target_sources(sc64_shell PRIVATE ${SC64_ROOT}/native/shell/voices.cpp)
+target_compile_definitions(sc64_shell PRIVATE SC64_VOICES=1)
 
 if(ANDROID)
     add_library(sc64_app SHARED "${SC64_ROOT}/native/shell/app.cpp" "${SC64_ROOT}/native/android/platform.cpp")

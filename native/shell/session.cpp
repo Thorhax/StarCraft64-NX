@@ -4,6 +4,9 @@
 #include "clock_bridge.hpp"
 #include "rdp_writeback.hpp"
 #include "flash_device.hpp"
+#if defined(SC64_VOICES)
+#include "voices.hpp"
+#endif
 #include "guest_fpu.hpp"
 #include "../runtime/guest_poll.hpp"
 #include "../runtime/rom_image.hpp"
@@ -51,6 +54,21 @@ struct SubmittedTask {
 std::mutex submitted_mutex;
 std::deque<std::unique_ptr<SubmittedTask>> submitted;
 std::vector<std::vector<std::uint8_t>> snapshot_pool; // recycled 8 MiB snapshot buffers
+// Recycled 8 MiB render results: only their target extents are refreshed per
+// frame (gfx::prepare_result_ram), instead of a full copy of the snapshot.
+std::vector<std::vector<std::uint8_t>> result_pool;
+void recycle(std::vector<std::vector<std::uint8_t>>& pool, std::vector<std::uint8_t>&& buffer) {
+    if (buffer.size() != 0x800000) return;
+    std::lock_guard lock(submitted_mutex);
+    if (pool.size() < 4) pool.push_back(std::move(buffer));
+}
+std::vector<std::uint8_t> take(std::vector<std::vector<std::uint8_t>>& pool) {
+    std::lock_guard lock(submitted_mutex);
+    if (pool.empty()) return {};
+    auto buffer = std::move(pool.back());
+    pool.pop_back();
+    return buffer;
+}
 std::shared_ptr<const RenderedFrame> render_task(SubmittedTask& job, std::shared_ptr<gfx::DrawList>& list,
                                                 const std::function<void()>& service);
 std::string sha1(std::span<const std::uint8_t> bytes) { return runtime::sha1_hex(bytes); }
@@ -122,6 +140,10 @@ void Session::launch_rom(std::vector<std::uint8_t> rom, const std::filesystem::p
     // Validate every user-owned input before process-wide side effects. The
     // save image may be malformed; failing here leaves no audio device open.
     runtime::flash_device().initialize(storage / "sc64.fla");
+#if defined(__SWITCH__)
+    // A save is ~400 page programs; writing the SD file for each one froze the game for ~20 s.
+    runtime::flash_device().defer_writes(std::chrono::milliseconds(500));
+#endif
     if (persist) {
         // Picker imports survive cold starts. APK assets already have persistent
         // storage, so that path never creates a second ROM file.
@@ -247,6 +269,7 @@ void Session::stop() {
     if (worker_.joinable()) { ultramodern::quit(); worker_.join(); }
     raster.reset();
     audio::shutdown();
+    runtime::flash_device().finish(); // publish a save the writer has not reached yet
     running = false;
 }
 void Session::fail(const std::string& message) {
@@ -312,30 +335,33 @@ std::shared_ptr<const RenderedFrame> render_task(SubmittedTask& job, std::shared
     if (ucode > canonical.size() - 4096 || sha1({canonical.data() + ucode, 4096}) != "7d0f686719afde0703d377ccc7a492318c01eec0")
         throw std::runtime_error("Graphics microcode identity mismatch");
     const auto interpret_start = std::chrono::steady_clock::now();
-    list = std::make_shared<gfx::DrawList>(gfx::interpret_gbi(canonical, job.data_ptr & 0x1fffffff, no_service));
+    // The DrawList takes the snapshot itself (no copy) and hands it back to the
+    // pool when the last owner releases it.
+    list = std::shared_ptr<gfx::DrawList>(
+        new gfx::DrawList(gfx::interpret_gbi(std::move(job.ram), job.data_ptr & 0x1fffffff, no_service)),
+        [](gfx::DrawList* done) { recycle(snapshot_pool, std::move(done->initial_ram)); delete done; });
     session().capture_interpret_ms = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - interpret_start).count();
-    {
-        // The DrawList owns its copy of the snapshot: recycle the buffer.
-        std::lock_guard lock(submitted_mutex);
-        if (snapshot_pool.size() < 3) snapshot_pool.push_back(std::move(job.ram));
-    }
     list->identity.task = ++session().tasks;
     list->identity.field = session().fields;
     for (const auto& rect : list->rectangles) session().cpu_scanouts.targeted(rect.target.address, list->identity.task);
-    auto rendered = std::make_shared<RenderedFrame>();
+    auto rendered = std::shared_ptr<RenderedFrame>(new RenderedFrame,
+        [](RenderedFrame* done) { recycle(result_pool, std::move(done->pixels.ram)); delete done; });
     const auto start = std::chrono::steady_clock::now();
+    // GL check compares every RDRAM byte, so it keeps full copies.
+    std::vector<std::uint8_t> spare = session().gpu_check ? std::vector<std::uint8_t>{} : take(result_pool);
     bool gpu = false;
     if (session().gpu_render) {
         gfx::SoftwareResult gpu_result;
+        gpu_result.ram = std::move(spare);
         if (session().gpu_render(*list, gpu_result, no_service)) {
             gpu = true;
             if (session().gpu_check)
                 ::check_gpu_frame(gpu_result, gfx::render_software(*list, no_service, session().raster.get()), rendered->pixels);
             else rendered->pixels = std::move(gpu_result);
-        }
+        } else spare = std::move(gpu_result.ram);
     }
-    if (!gpu) rendered->pixels = gfx::render_software(*list, no_service, session().raster.get());
+    if (!gpu) rendered->pixels = gfx::render_software(*list, no_service, session().raster.get(), std::move(spare));
     ++(gpu ? session().gpu_frames : session().software_frames);
     rendered->software_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
     rendered->software_service_ms = 0;
@@ -351,6 +377,11 @@ extern "C" void sc64_capture_submit(std::uint8_t* rdram, const OSTask* task) {
     sc64::runtime::report_host_failure<ultramodern::thread_terminated>([&] {
         sc64_pause_point();
         SubmissionGuard submission;
+        if (session().unlock_cheats) // live RDRAM keeps host-order 32-bit words
+            reinterpret_cast<std::uint32_t*>(rdram)[0xd13d0 / 4] |= 0x781e; // the eight cheat bits
+#if defined(SC64_VOICES)
+        sc64::voices::observe_messages(rdram);
+#endif
         const auto t = task->t;
         if (t.type != M_GFXTASK || t.ucode_size != 4096) throw std::runtime_error("Unknown graphics task");
         const auto snapshot_start=std::chrono::steady_clock::now();

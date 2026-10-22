@@ -121,6 +121,11 @@ public:
     // Switch: interpret/rasterize on the Gfx thread while the guest continues
     // (DP completion follows the work). Off: render on the submitting thread.
     bool async_graphics = false;
+    // Cheats page: every cheat available without the campaign's hidden unlock
+    // triggers (the trigger action calling 8003FB48 at 80081154 sets these bits
+    // in 800D13D0; 8006B970 masks the names of cheats whose bit is clear).
+    // Set before the guest starts.
+    bool unlock_cheats = false;
     std::atomic<std::uint64_t> gpu_frames{0}, software_frames{0};
 private:
     std::thread worker_;

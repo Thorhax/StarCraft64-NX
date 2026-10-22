@@ -627,7 +627,11 @@ bool GlRaster::render(const gfx::DrawList& list, gfx::SoftwareResult& out) {
 
     // ---- Read back and commit exactly like render_software: RAM image plus
     // the address ranges of actual stores.
-    out = gfx::SoftwareResult{list.initial_ram, 0, {}};
+    // out.ram may hold a recycled buffer from the caller: then only the target
+    // extents are refreshed instead of copying all 8 MiB of initial_ram.
+    std::vector<std::uint8_t> ram = std::move(out.ram);
+    gfx::prepare_result_ram(list, ram);
+    out = gfx::SoftwareResult{std::move(ram), 0, {}};
     glPixelStorei(GL_PACK_ALIGNMENT, 1);
     const auto t_read = clock::now();
     const auto* mapped = static_cast<const std::uint32_t*>(

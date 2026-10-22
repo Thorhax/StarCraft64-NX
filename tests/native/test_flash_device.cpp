@@ -1,3 +1,4 @@
+#include <thread>
 #include "flash_device.hpp"
 
 #include <algorithm>
@@ -104,7 +105,36 @@ int main(int argc, char** argv) {
         for (std::size_t index = 0; index < 128; ++index) require(rdram[(0x800 + index) ^ 3] == (index ^ 0xa5), "DMA byte-swapped RDRAM read/write");
         rejects([&] { sc64_flash_dma(rdram.data(), 0x807ffff0, 0x08000000, 32, 0); }, "guest boundary rejected");
         rejects([&] { sc64_flash_dma(rdram.data(), 0x80000000, 0x10000000, 4, 0); }, "physical device boundary rejected");
-        std::cout << "PASS: Flash protocol, end boundaries, atomic failure, read-back verification, cold reload, guest DMA byte order\n";
+        {
+            // Deferred persistence: a burst of page programs is one file write after it goes quiet.
+            const auto deferred_path = root / "deferred.bin";
+            FlashDevice deferred;
+            deferred.initialize(deferred_path);
+            deferred.defer_writes(std::chrono::milliseconds(100));
+            for (std::uint32_t page = 0; page < 400; ++page) {
+                deferred.command(0xb4000000);
+                std::array<std::uint8_t, 128> bytes;
+                bytes.fill(std::uint8_t(page));
+                deferred.write_dma(0, bytes);
+                deferred.command(0xa5000000 | (page & 0x3ff));
+            }
+            require(!std::filesystem::exists(deferred_path), "deferred image is not written during the burst");
+            const auto programmed = deferred.snapshot();
+            std::this_thread::sleep_for(std::chrono::milliseconds(400));
+            FlashDevice quiet;
+            quiet.initialize(deferred_path);
+            require(quiet.snapshot() == programmed, "deferred image written once quiet");
+            deferred.command(0xb4000000);
+            std::array<std::uint8_t, 128> last;
+            last.fill(0x5a);
+            deferred.write_dma(0, last);
+            deferred.command(0xa5000000);
+            deferred.finish(); // shutdown before the quiet period ends
+            FlashDevice finished;
+            finished.initialize(deferred_path);
+            require(finished.snapshot() == deferred.snapshot(), "finish publishes the pending image");
+        }
+        std::cout << "PASS: Flash protocol, end boundaries, atomic failure, read-back verification, cold reload, guest DMA byte order, deferred writes\n";
         return 0;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

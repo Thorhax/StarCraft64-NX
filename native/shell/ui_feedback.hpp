@@ -20,6 +20,10 @@ struct UiFeedback {
     std::vector<runtime::UiItem> items;
     bool pick_required = false;
     std::optional<runtime::CursorPick> pick;
+    // Results screens only: the outcome bit 8012CA48 stores at 8011281C (1 when
+    // the local player's game result is 1, a win), which also selects the
+    // victory or defeat menu (13..18) and music.
+    std::optional<bool> victory;
 };
 // Canonical, owned NTSC-U RDRAM only. Invalid pointers/cycles fail closed. No
 // arbitrary object callback is called, and no guest memory is modified.
@@ -48,6 +52,7 @@ inline UiFeedback read_ui(std::span<const std::uint8_t> ram, std::uint64_t field
             && word(0xa4ab0)==score_root && word((score_root&0x7fffff)+0x2c)==0x8012c90c
             && word(0x12c90c)==0x27bdffe0) {
             result.mode="results"; result.token=score_root;
+            result.victory=ram[0x11281c]==1;
             const auto selected=word(0x112804);
             if (selected>3) return result;
             // Exact NTSC-U 640x480 strip painted by 8012B4A4 at (218,30).
@@ -111,6 +116,8 @@ inline UiFeedback read_ui(std::span<const std::uint8_t> ram, std::uint64_t field
     }
     if (mode != 3) return result;
     result.mode = "game"; result.token = 3;
+    // Mission canvas width (0x800A5AF0): 320, or wider with the widescreen option.
+    const int image_width = std::clamp<int>(half(0xa5af0), 320, 512);
     const bool locked = half(0xf0c20) != 0;
     const bool build = !locked && ram[0xc6a64] != 0;
     if (!locked && !build) {
@@ -124,13 +131,13 @@ inline UiFeedback read_ui(std::span<const std::uint8_t> ram, std::uint64_t field
             && frontend.pick->camera_y==std::int32_t(word(0xa2eec))) result.pick=frontend.pick;
         if (frontend.hud_bounds && frontend.hud_bounds->context==context) {
             const auto& b=*frontend.hud_bounds;
-            if (b.x0>=0 && b.y0>=0 && b.x1<=320 && b.y1<=240 && b.x1>b.x0 && b.y1>b.y0)
+            if (b.x0>=0 && b.y0>=0 && b.x1<=image_width && b.y1<=240 && b.x1>b.x0 && b.y1>b.y0)
                 result.bounds=b;
         }
         for (const auto& item : frontend.items)
             if (item.group==4 && item.context==context && item.id<=4
                 && item.buttons==(item.id==4 ? 0x4000u : std::array<unsigned,4>{8,2,1,4}[item.id])
-                && item.x0>=0 && item.y0>=0 && item.x1<=320 && item.y1<=240
+                && item.x0>=0 && item.y0>=0 && item.x1<=image_width && item.y1<=240
                 && item.x1>item.x0 && item.y1>item.y0) result.items.push_back(item);
         return result;
     }
@@ -142,7 +149,7 @@ inline UiFeedback read_ui(std::span<const std::uint8_t> ram, std::uint64_t field
     auto child = word(parent + 0x44), selected = word(parent + 0x40);
     const float x = half(parent+4), y = half(parent+6);
     const float x1 = half(parent+8), y1 = half(parent+10);
-    if (build && x>=0 && y>=0 && x1<=320 && y1<=240 && x1>x && y1>y)
+    if (build && x>=0 && y>=0 && x1<=image_width && y1<=240 && x1>x && y1>y)
         result.bounds=runtime::UiBounds{x,y,x1,y1,0};
     std::array<std::uint32_t, 64> visited{};
     unsigned count = 0;

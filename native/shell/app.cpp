@@ -8,6 +8,8 @@
 #include "platform_sdl.hpp"
 #include "scripts.hpp"
 #include "video.hpp"
+#include "voices.hpp"
+#include "widescreen.hpp"
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
 #include <array>
@@ -176,7 +178,11 @@ SDL_AppResult SDL_AppInit(void** state, int argc, char* argv[]) {
             [raw] { return raw->pixels(); },
             [raw](int code) { raw->exit_code = code; },
             [raw] { return raw->video.name(); }});
+        sc64::desktop::session().unlock_cheats = app->config.number("sc64.unlock_cheats", 0) == 1;
+        if (const int width = int(app->config.number("sc64.widescreen", 0)); width)
+            sc64::runtime::set_widescreen(width);
         app->native->initialize();
+        sc64::voices::initialize((std::filesystem::path(app->native->storage()) / "voices").string());
         app->layouts = std::make_unique<FileLayoutStore>(std::filesystem::path(app->native->storage())
                                                          / "touch-layout-v2.json");
         app->host = std::make_unique<HostScript>(app->shared, *app->native, app->config);

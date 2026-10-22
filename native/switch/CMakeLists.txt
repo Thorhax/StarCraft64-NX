@@ -67,6 +67,16 @@ target_link_libraries(sc64_scripts PUBLIC sc64_input)
 # Voiced briefings (native/shell/voices.cpp).
 target_sources(sc64_shell PRIVATE ${SC64_ROOT}/native/shell/voices.cpp)
 target_compile_definitions(sc64_shell PRIVATE SC64_VOICES=1)
+# PC movies (native/shell/movie.cpp) through the switch-ffmpeg portlibs.
+find_library(SC64_AVFORMAT avformat PATHS /opt/devkitpro/portlibs/switch/lib)
+if(SC64_AVFORMAT)
+    target_sources(sc64_shell PRIVATE ${SC64_ROOT}/native/shell/movie.cpp)
+    target_compile_definitions(sc64_shell PUBLIC SC64_MOVIES=1)
+    target_include_directories(sc64_shell PRIVATE /opt/devkitpro/portlibs/switch/include)
+    target_link_libraries(sc64_shell PUBLIC "${SC64_AVFORMAT}" avcodec swscale swresample avutil dav1d bz2 z)
+    target_link_directories(sc64_shell PUBLIC /opt/devkitpro/portlibs/switch/lib)
+    message(STATUS "SC64 Switch: FFmpeg movies enabled")
+endif()
 
   add_executable(sc64_switch ${CMAKE_CURRENT_SOURCE_DIR}/app.cpp)
   find_library(SC64_LIBNX nx PATHS /opt/devkitpro/libnx/lib "$ENV{DEVKITPRO}/libnx/lib" REQUIRED)
