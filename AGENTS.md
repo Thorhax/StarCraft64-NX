@@ -16,7 +16,8 @@ and long Adreno/Mali performance/thermal runs are explicitly deferred. Stage 6
 was withdrawn at the user's request on 2026-10-09 (ADR-060). All HD/filter/scale
 choices and settings persistence are removed. Presentation always uses the
 original raster and aspect-preserving Fit, with one viewport for rendering/input.
-No widescreen guest patch is enabled or requested. The SDL3 shell (ADR-074)
+The only widescreen guest patch is the requested, opt-in 1P widescreen switch
+(`tools/recompile/apply_widescreen.py`, off by default). The SDL3 shell (ADR-074)
 also cross-builds Windows/Linux x86_64; their user acceptance is D-054. Check current documents
 rather than carrying forward an old receipt as proof for a new build or platform.
 

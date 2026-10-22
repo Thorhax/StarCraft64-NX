@@ -1,82 +1,46 @@
-# StarCraft 64 — Nintendo Switch port (v1.3)
+# StarCraft 64 — Nintendo Switch port (v1.4)
 
-Native **Nintendo Switch (Horizon / Atmosphère)** port of the
-[StarCraft 64 static recompilation](https://github.com/n0madic/StarCraft64-recomp)
-by n0madic, plus Linux/WSL build support for its Android APK.
+Native **Nintendo Switch (Horizon / Atmosphère)** port of StarCraft 64, with
+widescreen missions, the PC cinematics and the PC voice acting.
+
+This project continues **[gabryboy12-ai's StarCraft64-NX](https://github.com/gabryboy12-ai/StarCraft64-NX)**,
+the original Switch port (v0.5–v1.3: libnx shell, GPU renderer, asynchronous
+graphics, voiced briefings), which is itself built on
+**[n0madic's StarCraft 64 static recompilation](https://github.com/n0madic/StarCraft64-recomp)**.
+Their full commit history is kept in this repository. Thank you both.
 
 > **No game files are included.** This repository contains source code only.
 > You need your own legally obtained StarCraft 64 (USA) cartridge dump
 > (`.z64`, SHA-1 `a36d91b5aac7bb95df0d7de5f9814f5270e25c2b`). The ROM, the
-> recompiled game code and every game-derived file (icons included) are
-> generated on your machine and are never committed or distributed.
+> recompiled game code and every game-derived file (icons, movies and voices
+> included) are generated on your machine and are never committed or distributed.
 
 ---
 
-## A message from the author
+## What's new in v1.4
 
-Hello everyone, let me introduce this port, the first one I have brought to
-completion myself.
+- **Widescreen missions** (optional): 416×240 instead of 320×240, shown at
+  exactly 3× (1248×720). About 30% more of the map side to side; fog of war,
+  camera, cursor and touch cover the full width. The HUD follows the
+  wider screen: counters and command hints at the right edge, Advisor and
+  transmission boxes, pause menu and objectives centred. Menus and briefings
+  stay 4:3. Turn it on with an empty `widescreen` file (see
+  [Option files](#option-files)).
+- **PC cinematics**: the Blizzard logo and the StarCraft intro replace the N64
+  opening; each campaign's cinematics play before its briefings and after the
+  victories that unlock them, once per session. A, B, + or a tap skips.
+  Taken from your own classic StarCraft CD install (section 9).
+- **Voiced in-mission transmissions**: 508 transmissions in 54 missions play
+  the PC voice acting, matched automatically by their text (section 8).
+- **All cheats unlocked** on the Cheats page from the start.
+- **Louder game audio** (×4 with a soft limiter), so music and effects sit
+  with the voices, movies and other Switch software; adjustable.
+- **Much faster saving and loading**: FlashRAM writes are collected and
+  written to the SD card once.
+- **Faster graphics thread**: no more 8 MiB copies per frame.
+- Option files also work when Windows saves them with a `.txt` extension.
 
-Even if quietly, my work has contributed to a lot of what you see around:
-I laid the foundations for the Call of Duty: Black Ops port on Switch that
-Mr. Erik is working on; I got GTA IV running on Switch for the first time, and
-the port is now being completed by a colleague, DevZ; I translated the CafeOS
-libraries to HOS with **coreinit-nx**, which has been and will be used for
-Wii U to Switch ports; I am contributing to the **PS3recomp** project, working
-on Linux aarch64, to make future PS3 game ports to Switch possible — first on
-Linux and later, why not, on HOS too (you can find everything on my GitHub).
-
-Now this port, and in the future many other projects I have in mind that only
-time and resources keep me from reaching.
-
-All of this, as the previous sentence suggests, unfortunately has a cost:
-
-- The AI tool I use is paid monthly and lets these projects be completed in a
-  reasonable amount of time;
-- All these projects take time: a large part of my free time goes into them;
-- I use my hardware every day for a lot of testing, some of it stressful, and
-  sooner or later it will inevitably need maintenance.
-
-I am very happy to work for the community, practically for free; however, I
-have decided that at this point it is fair for me to be rewarded not only with
-pride but also with a few cents. Together with this port I am therefore
-announcing voluntary donations through **Buy Me a Coffee**: this way you can
-show me your closeness and support in a tangible way, and help me cover the
-costs and keep contributing.
-
-Above a certain threshold, top supporters will get early access to my projects
-and become official testers, with preview access to each project.
-
-I also accept requests for private projects, for amounts to be agreed, after a
-private consultation with me to assess feasibility, time and therefore any
-costs.
-
-Thank you for your understanding and your continued support.
-
-☕ **Buy Me a Coffee:** _link coming soon_
-
-<details>
-<summary>Messaggio originale (italiano)</summary>
-
-Salve a tutti, vi presento questo Port, il primo portato a termine dal sottoscritto.
-Tuttavia anche se in silenzio, il mio lavoro ha contribuito a tanto di quello che vedete in giro:
-Ho posto le basi per il Port di call of duty black ops sulla switch su cui sta lavorando il signor Erik, ho fatto partire per la prima volta GTA4 sulla switch, adesso il Port sta venendo completato da un collega: DevZ; Ho tradotto le librerie di cafeOS su HOS con coreinit-nx, che è stato utilizzato e sarà utilizzato per i Port dalla WiiU alla Switch; Sto contribuendo al progetto PS3recomp, lavorando su Linux aarch64, per permettere in futuro i Port dei giochi PS3 sulla switch, in un primo momento su Linux e successivamente perché no anche su HOS (Trovate tutto sul mio GitHub).
-Adesso questo port, e in futuro tanti altri progetti che ho in mente e che solo il tempo e le risorse mi bloccano dal raggiungere.
-Tutto questo purtroppo come anticipato nella frase precedente ha un costo:
-- Lo strumento AI che utilizzo viene pagato mensilmente e permette che questi progetti vengano portati a termine in tempi ragionevoli;
-- Tutti questi progetti richiedono tempo, una grande parte del mio tempo libero viene dedicata a questo.
-- Utilizzo l'hardware tutti i giorni con molti test, anche stressanti, questo prima o poi inevitabilmente richiederà della manutenzione.
-
-Io sono molto felice di lavorare per la community, praticamente gratis, tuttavia ho deciso che è giusto, a questo punto, che io venga retribuito, non solo con l'orgoglio, ma anche con qualche centesimo, infatti insieme a questo port annuncio l'apertura delle donazioni volontarie tramite buymeacoffee, in questo modo potete farmi sentire la vostra vicinanza e il vostro supporto anche in maniera tangibile e permettermi di mantenere i costi e continuare con il mio contributo.
-A partire da una certa soglia, i migliori donatori avranno accesso anticipato ai miei progetti e diventeranno tester ufficiali avendo accesso al progetto in anteprima.
-Inoltre per cifre da concordare accetto richieste di progetti privati, previa consultazione privata con il sottoscritto per valutarne la fattibilità, il tempo e quindi gli eventuali costi.
-Grazie per la comprensione e il continuo supporto.
-
-</details>
-
----
-
-## Status (v1.3)
+## Status
 
 Fully playable, with a GPU renderer and the work spread over the CPU cores.
 Measured on a Switch launched as a Sphaira 4-core forwarder:
@@ -97,7 +61,7 @@ Measured on a Switch launched as a Sphaira 4-core forwarder:
   RDP stores run on other cores before the RDP completion is signalled.
 - **Low clocks**: playable down to 612 MHz CPU / 152 MHz GPU (lower frame
   rate); 920 MHz CPU / 192 MHz GPU is a stable battery-saving setting.
-- **Voiced briefings** (new in v1.3): the original N64 briefings are text-only;
+- **Voiced briefings** (v1.3): the original N64 briefings are text-only;
   the port plays the PC voice acting from your own (free) StarCraft PC files,
   in English, Italian, Spanish or Portuguese. Missions and transmissions are
   matched automatically from the briefing text.
@@ -113,8 +77,8 @@ Measured on a Switch launched as a Sphaira 4-core forwarder:
 | 2 | OpenGL thread (texture planning, uploads, readback) |
 | 3 | system; raster helper when a frame falls back to software |
 
-**Next:** translated briefing and interface text (the voice files already
-come with translated briefing texts).
+**Next:** HD graphics from the PC version (the N64 sprites are half-size
+copies of the PC ones), translated briefing and interface text.
 
 ### Controls
 
@@ -143,7 +107,7 @@ sudo apt install -y build-essential clang lld cmake ninja-build git unzip curl w
   python3 python3-venv python3-pip openjdk-21-jdk binutils-mips-linux-gnu docker.io
 sudo usermod -aG docker $USER   # then: wsl --shutdown, reopen Ubuntu
 docker pull devkitpro/devkita64
-git clone https://github.com/gabryboy12-ai/StarCraft64-NX.git
+git clone https://github.com/Thorhax/StarCraft64-NX.git
 cd StarCraft64-NX
 python3 -m venv .venv
 .venv/bin/pip install spimdisasm==1.42.4 pyelftools numpy pillow
@@ -205,7 +169,7 @@ Without it the NRO still builds and runs with the software renderer.
 ### 5. Recompile, prepare the runtime, build
 
 ```bash
-make recompile ROM="$ROM"
+make recompile ROM="$ROM"      # also adds the widescreen switch (tools/recompile/apply_widescreen.py)
 python3 tools/recompile/patch_runtime.py third_party/N64ModernRuntime local/deps/N64ModernRuntime
 python3 tools/recompile/patch_host_runtime.py local/deps/N64ModernRuntime
 python3 -c "import sys; sys.path.insert(0,'tools/desktop'); import patch_shell_runtime as p; from pathlib import Path; p.prepare(Path('local/deps/N64ModernRuntime'), Path('local/deps/N64ModernRuntime-shell'))"
@@ -290,19 +254,53 @@ no audio is distributed with this project.
 one `voices: briefing matched <mission> ...` line per briefing. While a voice
 plays, the music is lowered.
 
-### Troubleshooting switches
+**In-mission transmissions** (English) come from the same `enUS/campaign`
+folder, paired with the N64 maps extracted from your ROM:
 
-Empty files in `switch/StarCraft64/` change the renderer without rebuilding:
+```bash
+python3 tools/bolt_extract.py "$ROM" local/extracted/sc64-usa
+python3 tools/voices/extract_ingame_voices.py local/extracted/sc64-usa \
+  /mnt/c/Users/<you>/Desktop/CascView/enUS/campaign local/voices
+```
+
+It writes `local/voices/enUS/ingame.json` and the voice files next to the
+briefing ones; copy `local/voices` to the SD card again. `sc64.log` then shows
+`voices: 508 in-mission transmissions`.
+
+If you only have the classic CD version (1.16), `tools/voices/extract_campaign.py`
+extracts the same campaign layout from its `CampnSC.dat` / `CampnBW.dat`
+(needs StormLib, see below).
+
+### 9. PC cinematics (optional)
+
+The movies come from the **classic StarCraft / Brood War CD install** (the
+Remastered edition does not include them): the folder with `StarCraft.exe`,
+`BroodWar.exe`, `CampnSC.dat` and `CampnBW.dat`. The extractor uses
+[StormLib](https://github.com/ladislav-zezula/StormLib) to read those archives:
+
+```bash
+git clone https://github.com/ladislav-zezula/StormLib && cmake -S StormLib -B StormLib/build -DBUILD_SHARED_LIBS=ON && cmake --build StormLib/build -j
+STORMLIB=$PWD/StormLib/build/libstorm.so python3 tools/voices/extract_movies.py /mnt/c/path/to/StarCraft local/movies
+```
+
+Copy `local/movies` (28 `.smk` files, about 580 MB) to the SD card as
+`switch/StarCraft64/movies`. `sc64.log` shows `movie: 28 movies installed, enabled`.
+
+### Option files
+
+Empty files in `switch/StarCraft64/` change the port's behaviour without
+rebuilding. A `.txt` extension is fine (`widescreen.txt` works like `widescreen`).
 
 | File | Effect |
 |---|---|
+| `widescreen` | widescreen missions (416×240); `sc64.log` shows `widescreen: 416x240 missions` |
+| `nomovies` | no PC cinematics, even when installed |
+| `novoices` | no voice playback, even when the voice files are installed |
+| `lockcheats` | keep the original cheat unlocks |
+| `volume` | not empty: one number, the game volume factor (default `4`; `1` = original level) |
 | `softraster` | CPU renderer (v0.5 behaviour), GPU unused |
 | `nogl` | no Mesa at all |
 | `glcheck` | renders every frame on GPU and CPU, logs any difference (slow; for testing) |
-| `novoices` | silent briefings even when the voice files are installed |
-
-Create them from Windows with `New-Item E:\switch\StarCraft64\glcheck -ItemType File`
-(Notepad would add `.txt`).
 
 ## Android APK from Linux/WSL
 
@@ -325,6 +323,14 @@ and Build-Tools 36. See [docs/android.md](docs/android.md) and
   and page from RDRAM, matches missions/transmissions against the PC text,
   streams the voice from the SD card and mixes it over the ducked game audio;
   `tools/voices/extract_briefings.py` converts the user's PC campaign maps
+- `native/shell/voices.*` (v1.4) — in-mission transmissions: the open message
+  box's text is matched against `ingame.json`
+- `native/shell/movie.*` and `native/switch/app.cpp` (v1.4) — FFmpeg movie
+  player paced by the wall clock, and the cinematic schedule
+- `native/runtime/widescreen.hpp`, `tools/recompile/apply_widescreen.py` (v1.4)
+  — runtime widescreen switch for the recompiled 1P code; dialogs are moved
+  when they open (`sc64_ws_dialog` in `ui_feedback.cpp`)
+- `native/runtime/flash_device.*` (v1.4) — deferred FlashRAM writes
 - `native/gfx_core/` — RDP FILL mode (Brood War loading screens)
 - `tools/switch/` — Docker build, Mesa portlibs import, runtime derivation with
   asserted `__SWITCH__` patches (semaphores, memory, thread cores/priorities,
@@ -341,7 +347,13 @@ and Build-Tools 36. See [docs/android.md](docs/android.md) and
   libnx, decompals ultralib, shygoo n64sym, miniaudio, SDL
 - [NaGaa95/mesa-switch](https://github.com/NaGaa95/mesa-switch) — Mesa for
   Horizon (nouveau OpenGL, NVK) that the GPU renderer runs on
-- Switch port: gabryboy12-ai
+- [gabryboy12-ai/StarCraft64-NX](https://github.com/gabryboy12-ai/StarCraft64-NX) —
+  **gabryboy12-ai**, creator of the original Switch port (v0.5–v1.3) this
+  project continues: libnx shell, GPU renderer, asynchronous graphics,
+  voiced briefings
+- v1.4 (widescreen, cinematics, in-mission voices and the rest): Thorhax
+- [StormLib](https://github.com/ladislav-zezula/StormLib) (movie extraction),
+  [FFmpeg](https://ffmpeg.org) (movie playback)
 
 Source code: MIT (see [LICENSE](LICENSE)), except files noted there.
 StarCraft is a trademark of Blizzard Entertainment; StarCraft 64 and its
