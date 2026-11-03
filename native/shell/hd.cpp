@@ -53,7 +53,7 @@ void put(std::uint8_t* rdram, std::uint32_t a, const std::uint8_t* src, std::siz
 std::uint64_t mix(std::uint64_t hash, std::uint32_t word) { return (hash ^ word) * 0x100000001b3ull + (hash >> 29); }
 
 // ---- PC graphics
-struct GrpFrame { std::uint8_t x, y, w, h; std::uint32_t offset, size; };
+struct GrpFrame { std::uint8_t x, y, w, h; std::uint32_t offset, size; std::vector<std::uint8_t> swapped; };
 struct Grp { unsigned width = 0, height = 0; std::vector<GrpFrame> frames; std::vector<std::uint8_t> data; };
 struct Tileset {
     std::vector<std::uint8_t> cv5, vr4, wpe;
@@ -449,11 +449,7 @@ Frames take(const std::uint8_t* rdram) {
         frame->canvas = address; frame->canvas_width = c.width; frame->canvas_height = c.height;
         const std::size_t n = std::size_t(c.width) * c.height * 4;
         frame->pixels.resize(n);
-        for (std::size_t i = 0; i < n; i += 4) {
-            const std::uint32_t v = gw(rdram, c.pixels + std::uint32_t(i));
-            frame->pixels[i] = std::uint8_t(v >> 24); frame->pixels[i + 1] = std::uint8_t(v >> 16);
-            frame->pixels[i + 2] = std::uint8_t(v >> 8); frame->pixels[i + 3] = std::uint8_t(v);
-        }
+        std::memcpy(frame->pixels.data(), rdram + offset(c.pixels), n); // guest word order
         std::uint64_t hash = 14695981039346656037ull;
         for (std::uint32_t i = 0; i < c.width * c.height; i += 4) hash = mix(hash, gw(rdram, 0x80000000u + address + i));
         frame->canvas_hash = hash;
@@ -508,22 +504,32 @@ std::optional<std::vector<std::uint8_t>> compose(const gfx::DrawList& list, cons
     const auto bounds = gfx::raster_bounds(*bg);
     const int s0 = bg->s >> 5, t0 = bg->t >> 5, x0 = bg->x0 / 4, y0 = bg->y0 / 4;
     const unsigned fw = frame->canvas_width * 2;
-    // RDP rectangles after the background that are smaller than half of it (minimap,
-    // HUD, cursor; not the fog layer over the whole view): there only pixels left
-    // exactly as the canvas are HD, the rest stays as drawn even when it is dark.
+    // RDP rectangles after the background narrower than 3/4 of it (minimap, HUD,
+    // cursor, dialogs; not the fog layer, drawn in full-width strips): there only
+    // pixels left exactly as the canvas are HD, the rest stays as drawn even when dark.
     thread_local std::vector<std::uint8_t> overlay;
     overlay.assign(std::size_t(w) * h, 0);
     {
-        const auto area = [](const gfx::PixelBounds& b) { return std::int64_t(b.x1 - b.x0) * (b.y1 - b.y0); };
         bool after = false;
         for (const auto& r : list.rectangles) {
             if (&r == bg) { after = true; continue; }
             if (!after || r.target != target) continue;
             const auto rb = gfx::raster_bounds(r);
-            if (rb.empty() || area(rb) * 2 >= area(bounds)) continue;
+            if (rb.empty() || (rb.x1 - rb.x0) * 4 >= (bounds.x1 - bounds.x0) * 3) continue;
+            // A copied background marks only its visible texels (dismissed boxes stay
+            // drawn, fully transparent); anything else marks its whole rectangle.
+            const gfx::Texture* source = r.texture != gfx::no_texture ? &list.textures[r.texture] : nullptr;
+            const bool texels = source && source->background && r.dsdx == 1024 && r.dtdy == 1024
+                                && source->pixels.size() == std::size_t(source->width) * source->height;
             for (int y = std::max(0, rb.y0); y < std::min(int(h), rb.y1); ++y)
-                std::fill_n(overlay.begin() + std::ptrdiff_t(y) * w + std::max(0, rb.x0),
-                            std::max(0, std::min(int(w), rb.x1) - std::max(0, rb.x0)), std::uint8_t(1));
+                for (int x = std::max(0, rb.x0); x < std::min(int(w), rb.x1); ++x) {
+                    if (texels) {
+                        const int tu = (r.s >> 5) + x - r.x0 / 4, tv = (r.t >> 5) + y - r.y0 / 4;
+                        if (tu < 0 || tv < 0 || tu >= int(source->width) || tv >= int(source->height)
+                            || source->pixels[std::size_t(tv) * source->width + unsigned(tu)].a == 0) continue;
+                    }
+                    overlay[std::size_t(y) * w + unsigned(x)] = 1;
+                }
         }
     }
     // Pass 1: each canvas pixel's fog alpha (0..256), or -1 where the RDP drew over
@@ -559,27 +565,47 @@ std::optional<std::vector<std::uint8_t>> compose(const gfx::DrawList& list, cons
         }
     }
     // Pass 2: the RDP dithers the fog; a 3x3 average over the blended pixels
-    // smooths its edges at twice the resolution. Padded by one pixel, separable.
-    const unsigned pw = w + 2, ph = h + 2;
-    thread_local std::vector<std::int32_t> sums, counts;
-    sums.assign(std::size_t(pw) * ph, 0); counts.assign(std::size_t(pw) * ph, 0);
-    for (unsigned y = 0; y < h; ++y)
-        for (unsigned x = 0; x < w; ++x) {
-            const int a = alpha[std::size_t(y) * w + x];
-            if (a < 0) continue;
-            const std::size_t i = std::size_t(y + 1) * pw + x + 1;
-            sums[i - 1] += a; sums[i] += a; sums[i + 1] += a;
-            counts[i - 1] += 1; counts[i] += 1; counts[i + 1] += 1;
-        }
+    // smooths its edges at twice the resolution. Row sums of three, then three rows;
+    // flat marks pixels whose whole neighbourhood has their alpha (no blending needed).
+    const unsigned pw = w + 2;
+    thread_local std::vector<std::int32_t> row_sums, row_counts;
     thread_local std::vector<std::int16_t> smooth;
-    smooth.assign(std::size_t(pw) * ph, -1);
-    for (unsigned y = 0; y < h; ++y)
+    thread_local std::vector<std::uint8_t> flat;
+    row_sums.assign(std::size_t(pw) * (h + 2), 0); row_counts.assign(std::size_t(pw) * (h + 2), 0);
+    smooth.assign(std::size_t(pw) * (h + 2), -1); flat.assign(std::size_t(w) * h, 0);
+    for (unsigned y = 0; y < h; ++y) {
+        const std::int16_t* ar = alpha.data() + std::size_t(y) * w;
+        std::int32_t* rs = row_sums.data() + std::size_t(y + 1) * pw + 1;
+        std::int32_t* rc = row_counts.data() + std::size_t(y + 1) * pw + 1;
         for (unsigned x = 0; x < w; ++x) {
-            if (alpha[std::size_t(y) * w + x] < 0) continue;
-            const std::size_t i = std::size_t(y + 1) * pw + x + 1;
-            const int sum = sums[i - pw] + sums[i] + sums[i + pw], count = counts[i - pw] + counts[i] + counts[i + pw];
-            smooth[i] = std::int16_t(sum / count);
+            int sum = 0, count = 0;
+            for (int dx = -1; dx <= 1; ++dx) {
+                const int nx = int(x) + dx;
+                if (nx < 0 || nx >= int(w) || ar[nx] < 0) continue;
+                sum += ar[nx]; ++count;
+            }
+            rs[x] = sum; rc[x] = count;
         }
+    }
+    static const std::array<std::int32_t, 10> reciprocal = [] {
+        std::array<std::int32_t, 10> r{};
+        for (int i = 1; i < 10; ++i) r[std::size_t(i)] = (65536 + i - 1) / i;
+        return r;
+    }();
+    for (unsigned y = 0; y < h; ++y) {
+        const std::int16_t* ar = alpha.data() + std::size_t(y) * w;
+        const std::int32_t* s0r = row_sums.data() + std::size_t(y) * pw + 1;
+        const std::int32_t* c0r = row_counts.data() + std::size_t(y) * pw + 1;
+        std::int16_t* out_s = smooth.data() + std::size_t(y + 1) * pw + 1;
+        std::uint8_t* out_f = flat.data() + std::size_t(y) * w;
+        for (unsigned x = 0; x < w; ++x) {
+            const int a = ar[x];
+            if (a < 0) continue;
+            const int sum = s0r[x] + s0r[x + pw] + s0r[x + 2 * pw], count = c0r[x] + c0r[x + pw] + c0r[x + 2 * pw];
+            out_s[x] = std::int16_t((std::int64_t(sum) * reciprocal[std::size_t(count)]) >> 16);
+            out_f[x] = count == 9 && sum == 9 * a;
+        }
+    }
     // Pass 3: each HD pixel with the alpha interpolated toward its neighbours.
     for (unsigned y = 0; y < h; ++y) {
         std::uint32_t* o0 = out + std::size_t(y) * 2 * ow;
@@ -587,27 +613,26 @@ std::optional<std::vector<std::uint8_t>> compose(const gfx::DrawList& list, cons
         const std::uint32_t* f = in + std::size_t(y) * w;
         const int v = t0 + int(y) - y0;
         const std::int16_t* s = smooth.data() + std::size_t(y + 1) * pw + 1;
+        const std::uint8_t* fl = flat.data() + std::size_t(y) * w;
         for (unsigned x = 0; x < w; ++x) {
             const std::uint32_t pixel = f[x] | 0xff000000u;
             const int a = s[x];
             if (a < 0) { o0[2 * x] = o0[2 * x + 1] = o1[2 * x] = o1[2 * x + 1] = pixel; continue; }
             const int u = s0 + int(x) - x0;
-            const std::uint8_t* hd0 = frame->pixels.data() + std::size_t(v) * 2 * fw + unsigned(u) * 2;
-            const std::uint8_t* hd1 = hd0 + fw;
-            const std::uint8_t q[4] = {hd0[0], hd0[1], hd1[0], hd1[1]};
+            const std::size_t hd0 = std::size_t(v) * 2 * fw + unsigned(u) * 2, hd1 = hd0 + fw;
+            const std::uint8_t* hd = frame->pixels.data();
+            const std::uint8_t q[4] = {hd[hd0 ^ 3], hd[(hd0 + 1) ^ 3], hd[hd1 ^ 3], hd[(hd1 + 1) ^ 3]};
             std::uint32_t* const o[4] = {&o0[2 * x], &o0[2 * x + 1], &o1[2 * x], &o1[2 * x + 1]};
-            auto near = [&](int dx, int dy) { const int n = s[int(x) + dx + dy * int(pw)]; return n < 0 ? a : n; };
-            const int l = near(-1, 0), r = near(1, 0), up = near(0, -1), dn = near(0, 1);
-            if (a == 0 && l == 0 && r == 0 && up == 0 && dn == 0 && near(-1, -1) == 0 && near(1, -1) == 0
-                && near(-1, 1) == 0 && near(1, 1) == 0) { // clear of fog: the HD pixels as they are
+            if (fl[x] && a == 0) { // clear of fog: the HD pixels as they are
                 for (int i = 0; i < 4; ++i) *o[i] = q[i] ? palette[q[i]] : pixel;
                 continue;
             }
-            if (a == 256 && l == 256 && r == 256 && up == 256 && dn == 256 && near(-1, -1) == 256
-                && near(1, -1) == 256 && near(-1, 1) == 256 && near(1, 1) == 256) { // deep in the fog
+            if (fl[x] && a == 256) { // deep in the fog
                 for (int i = 0; i < 4; ++i) *o[i] = q[i] ? fog_pixel : pixel;
                 continue;
             }
+            auto near = [&](int dx, int dy) { const int n = s[int(x) + dx + dy * int(pw)]; return n < 0 ? a : n; };
+            const int l = near(-1, 0), r = near(1, 0), up = near(0, -1), dn = near(0, 1);
             for (int i = 0; i < 4; ++i) {
                 if (!q[i]) { *o[i] = pixel; continue; } // beyond the map: as the N64 drew it
                 const int dx = (i & 1) ? 1 : -1, dy = (i & 2) ? 1 : -1;
@@ -713,10 +738,10 @@ extern "C" void sc64_hd_image(std::uint8_t* rdram, recomp_context* ctx) {
     }
     const unsigned id = gh(rdram, image + 8), flags = gh(rdram, image + 0xA);
     const std::uint32_t sprite = gw(rdram, image + 0x38);
-    const Grp* grp = id < 999 && image_grp[id] && image_grp[id] < grps.size() ? grps[image_grp[id]].get() : nullptr;
+    Grp* grp = id < 999 && image_grp[id] && image_grp[id] < grps.size() ? grps[image_grp[id]].get() : nullptr;
     const unsigned frame_index = (gw(rdram, image + 0xC) >> 6) & 0xFFF;
     if (!grp || frame_index >= grp->frames.size() || (sprite >> 24) != 0x80) { begin_fallback(rdram, ctx); return; }
-    const GrpFrame& f = grp->frames[frame_index];
+    GrpFrame& f = grp->frames[frame_index];
     if (!f.w || !f.h || !f.size || f.size + 8 > scratch_size) { begin_fallback(rdram, ctx); return; }
     const bool flipped = flags & 0x4000;
     const int hoff = std::int8_t(gb(rdram, image + 0x10)), voff = std::int8_t(gb(rdram, image + 0x11));
@@ -734,7 +759,12 @@ extern "C" void sc64_hd_image(std::uint8_t* rdram, recomp_context* ctx) {
     // The PC frame in the game's own layout: header, then its line table and lines.
     sw(rdram, scratch, std::uint32_t(f.x) << 24 | std::uint32_t(f.y) << 16 | std::uint32_t(f.w) << 8 | f.h);
     sw(rdram, scratch + 4, scratch + 8);
-    put(rdram, scratch + 8, grp->data.data() + f.offset, f.size);
+    // The frame's bytes in guest word order, made once per frame.
+    if (f.swapped.empty()) {
+        f.swapped.assign((f.size + 3) & ~3u, 0);
+        for (std::uint32_t i = 0; i < f.size; ++i) f.swapped[i ^ 3] = grp->data[f.offset + i];
+    }
+    std::memcpy(rdram + offset(scratch + 8), f.swapped.data(), f.swapped.size());
     sh(rdram, rect, std::uint16_t(rx)); sh(rdram, rect + 2, std::uint16_t(ry));
     sh(rdram, rect + 4, std::uint16_t(rw)); sh(rdram, rect + 6, std::uint16_t(rh));
     call_render(rdram, ctx, c, render, x + rx, y + ry, scratch, gw(rdram, image + 0x2C));

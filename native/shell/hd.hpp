@@ -19,7 +19,7 @@ struct Frame {
     std::uint32_t canvas = 0;            // physical address of the N64 canvas it doubles
     unsigned canvas_width = 0, canvas_height = 0;
     std::uint64_t canvas_hash = 0;       // the N64 canvas bytes when it was taken
-    std::vector<std::uint8_t> pixels;    // (2 * canvas_width) x (2 * canvas_height)
+    std::vector<std::uint8_t> pixels;    // (2 * canvas_width) x (2 * canvas_height), guest word order (index ^ 3)
 };
 using Frames = std::vector<std::shared_ptr<const Frame>>;
 
