@@ -21,3 +21,9 @@ std::vector<std::uint8_t> sc64_read_bundled_rom();
 // Vibrate for milliseconds at amplitude 1..255; milliseconds <= 0 stops.
 // Hosts without a vibrator ignore it.
 void sc64_platform_vibrate(int milliseconds, int amplitude);
+// Starts a detached background worker (asset loading). False when no thread could be made.
+bool sc64_platform_thread(void (*entry)());
+// Brackets heavy main-thread work (HD composition): on Switch the main thread moves off
+// core 0, which it shares with the graphics thread, for the duration. No-op elsewhere.
+void sc64_platform_heavy_begin();
+void sc64_platform_heavy_end();

@@ -16,6 +16,9 @@
 #if defined(SC64_MOVIES)
 #include "movie.hpp"
 #endif
+#if defined(SC64_MUSIC)
+#include "music.hpp"
+#endif
 #if defined(__SWITCH__)
 #include <switch.h>
 #include <cstdlib>
@@ -159,6 +162,9 @@ void mix_sources(float* dst, ma_uint32 frames) {
     if (result.waiting) ++wait_count;
     played_count += result.played; nonzero_count += result.nonzero;
     buffered_frames = unsigned(pcm.size()); buffering = pcm.buffering();
+#if defined(SC64_MUSIC)
+    sc64::music::mix(dst, frames, game_gain.load(std::memory_order_relaxed)); // in place of the muted N64 stream
+#endif
 #if defined(SC64_VOICES)
     sc64::voices::mix(dst, frames); // briefing voice over the game audio (ducked)
 #endif

@@ -40,7 +40,8 @@ add_library(sc64_shell STATIC
     ${SC64_ROOT}/native/shell/miniaudio.c ${SC64_ROOT}/native/shell/log.cpp
     ${SC64_ROOT}/native/shell/native.cpp ${SC64_ROOT}/native/shell/video.cpp
     ${SC64_ROOT}/native/shell/platform_sdl.cpp
-    ${SC64_ROOT}/native/runtime/flash_device.cpp ${SC64_ROOT}/native/runtime/ui_feedback.cpp)
+    ${SC64_ROOT}/native/runtime/flash_device.cpp ${SC64_ROOT}/native/runtime/ui_feedback.cpp
+    ${SC64_ROOT}/native/shell/hd.cpp)
 target_include_directories(sc64_shell PUBLIC "${SC64_ROOT}/native/shell" "${SC64_ROOT}/native/runtime"
     "${SC64_TOOLCHAINS}")
 target_compile_definitions(sc64_shell PUBLIC SC64_SDL_VERSION="3.4.18")
@@ -49,6 +50,21 @@ target_link_libraries(sc64_shell PUBLIC sc64_game sc64_gfx_core sc64_scripts sc6
 # Voiced briefings and transmissions (native/shell/voices.cpp), from <storage>/voices.
 target_sources(sc64_shell PRIVATE ${SC64_ROOT}/native/shell/voices.cpp)
 target_compile_definitions(sc64_shell PRIVATE SC64_VOICES=1)
+# PC music (native/shell/music.cpp) through the system FFmpeg (pkg-config). Off by default so the
+# distributed desktop builds keep their library set; without it the desktop plays the N64 music.
+option(SC64_DESKTOP_FFMPEG "Desktop PC music through the system FFmpeg" OFF)
+if(SC64_DESKTOP_FFMPEG AND NOT ANDROID)
+    find_package(PkgConfig REQUIRED)
+    if(PKG_CONFIG_FOUND)
+        pkg_check_modules(SC64_FFMPEG REQUIRED IMPORTED_TARGET libavformat libavcodec libswresample libavutil)
+    endif()
+    if(SC64_FFMPEG_FOUND)
+        target_sources(sc64_shell PRIVATE ${SC64_ROOT}/native/shell/music.cpp)
+        target_compile_definitions(sc64_shell PUBLIC SC64_MUSIC=1)
+        target_link_libraries(sc64_shell PUBLIC PkgConfig::SC64_FFMPEG)
+        message(STATUS "SC64: FFmpeg ${SC64_FFMPEG_libavformat_VERSION}, PC music enabled")
+    endif()
+endif()
 
 if(ANDROID)
     add_library(sc64_app SHARED "${SC64_ROOT}/native/shell/app.cpp" "${SC64_ROOT}/native/android/platform.cpp")

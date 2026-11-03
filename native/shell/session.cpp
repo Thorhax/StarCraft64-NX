@@ -50,6 +50,7 @@ struct SubmittedTask {
     // Synchronous mode (async_graphics off): already rendered on the guest thread.
     std::shared_ptr<gfx::DrawList> list;
     std::shared_ptr<const RenderedFrame> rendered;
+    hd::Frames hd;
 };
 std::mutex submitted_mutex;
 std::deque<std::unique_ptr<SubmittedTask>> submitted;
@@ -365,6 +366,7 @@ std::shared_ptr<const RenderedFrame> render_task(SubmittedTask& job, std::shared
     ++(gpu ? session().gpu_frames : session().software_frames);
     rendered->software_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
     rendered->software_service_ms = 0;
+    rendered->hd = std::move(job.hd);
     // RDP stores into live guest RAM, before DP completion is signalled.
     commit_rdp_writes(rendered->pixels, {job.rdram, std::size_t(0x800000)});
     return rendered;
@@ -402,6 +404,7 @@ extern "C" void sc64_capture_submit(std::uint8_t* rdram, const OSTask* task) {
         job->ucode=t.ucode;
         job->data_ptr=t.data_ptr;
         job->ui=sc64::runtime::take_frontend_feedback();
+        job->hd=sc64::hd::take(rdram);
         session().capture_snapshot_ms=std::chrono::duration<double,std::milli>(
             std::chrono::steady_clock::now()-snapshot_start).count();
         if(!session().async_graphics) {

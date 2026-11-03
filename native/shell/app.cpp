@@ -9,6 +9,10 @@
 #include "scripts.hpp"
 #include "video.hpp"
 #include "voices.hpp"
+#include "hd.hpp"
+#if defined(SC64_MUSIC)
+#include "music.hpp"
+#endif
 #include "widescreen.hpp"
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
@@ -183,6 +187,10 @@ SDL_AppResult SDL_AppInit(void** state, int argc, char* argv[]) {
             sc64::runtime::set_widescreen(width);
         app->native->initialize();
         sc64::voices::initialize((std::filesystem::path(app->native->storage()) / "voices").string());
+        sc64::hd::initialize((std::filesystem::path(app->native->storage()) / "hd").string());
+#if defined(SC64_MUSIC)
+        sc64::music::initialize((std::filesystem::path(app->native->storage()) / "music").string());
+#endif
         app->layouts = std::make_unique<FileLayoutStore>(std::filesystem::path(app->native->storage())
                                                          / "touch-layout-v2.json");
         app->host = std::make_unique<HostScript>(app->shared, *app->native, app->config);
@@ -363,6 +371,9 @@ void SDL_AppQuit(void* state, SDL_AppResult) {
     SDL_RemoveEventWatch(background_watch, app.get());
     if (app->gui) app->gui->final();
     if (app->host) app->host->final();
+#if defined(SC64_MUSIC)
+    sc64::music::shutdown();
+#endif
     if (app->native) app->native->finalize();
     for (const auto& [_, entry] : app->gamepads) SDL_CloseGamepad(entry.second);
     sc64_platform_attach_window(nullptr);

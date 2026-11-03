@@ -4,7 +4,8 @@
 Chains the documented Stage 1 steps: patch and build N64Recomp, analyze the ROM
 (prepare.py), add the guarded UI observers (add_ui_hooks.py), generate C
 (run_recompiler.py --replace), validate the observers, then add the runtime
-widescreen switch (apply_widescreen.py). The observers are what the shell build
+widescreen switch (apply_widescreen.py), the PC music hook (apply_music_hook.py) and the
+HD mission hooks (apply_hd_hooks.py). The observers are what the shell build
 requires. The libultra inventory is a prepared input (see docs/libultra-inventory.md);
 it is verified, never rebuilt here. Run with the Python that has spimdisasm
 (the Makefile uses .venv/bin/python). All outputs stay under ignored local/.
@@ -117,6 +118,8 @@ def main() -> None:
                             "--recompiler", RECOMPILER_BINARY, "--output", output, "--replace"])
     run("validate observers", [sys.executable, ROOT / "tools/desktop/game_validation.py", output])
     run("add widescreen switch", [sys.executable, TOOLS / "apply_widescreen.py", output])
+    run("add PC music hook", [sys.executable, TOOLS / "apply_music_hook.py", output])
+    run("add HD mission hooks", [sys.executable, TOOLS / "apply_hd_hooks.py", output])
     log.info("PASS: %s ready for `make build`; analysis kept in %s", output, analysis)
 
 

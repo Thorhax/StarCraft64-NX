@@ -1,5 +1,6 @@
 #pragma once
 #include "gfx.hpp"
+#include "hd.hpp"
 #include "scanout.hpp"
 #include "pause_policy.hpp"
 #include "../runtime/ui_feedback.hpp"
@@ -20,6 +21,7 @@ struct RenderedFrame {
     gfx::SoftwareResult pixels;
     // Wall time, and the part of it spent servicing other guest threads.
     double software_ms=0, software_service_ms=0;
+    hd::Frames hd; // HD mission canvases finished before this task (hd.hpp)
 };
 // Three owned slots; the consumer holds a shared packet while the producer can
 // replace an obsolete slot. No pointer into guest memory crosses this boundary.

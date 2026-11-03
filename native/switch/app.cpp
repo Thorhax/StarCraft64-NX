@@ -5,6 +5,10 @@
 #include "log.hpp"
 #include "native.hpp"
 #include "voices.hpp"
+#include "hd.hpp"
+#if defined(SC64_MUSIC)
+#include "music.hpp"
+#endif
 #include "widescreen.hpp"
 #if defined(SC64_MOVIES)
 #include "movie.hpp"
@@ -498,6 +502,12 @@ int main(int argc, char* argv[]) {
         app->native->initialize();
         // Voiced briefings from the user's own PC files (tools/voices/extract_briefings.py).
         sc64::voices::initialize(std::string(storage_dir) + "/voices");
+        // HD missions from the user's own PC graphics (tools/hd/extract_graphics.py); nohd keeps the N64 ones.
+        sc64::hd::initialize(std::string(storage_dir) + "/hd");
+#if defined(SC64_MUSIC)
+        // PC music from the user's own CDs (tools/music/extract_music.py); n64music keeps the original.
+        sc64::music::initialize(std::string(storage_dir) + "/music");
+#endif
         {
             float volume = default_volume;
             if (FILE* f = std::fopen("sdmc:/switch/StarCraft64/volume", "r")) {
@@ -568,6 +578,9 @@ int main(int argc, char* argv[]) {
 #endif
     if (app->gui) app->gui->final();
     if (app->host) app->host->final();
+#if defined(SC64_MUSIC)
+    sc64::music::shutdown();
+#endif
     if (app->native) app->native->finalize();
     sc64::desktop::session().gpu_render = nullptr;
 #if defined(SC64_SWITCH_GL)

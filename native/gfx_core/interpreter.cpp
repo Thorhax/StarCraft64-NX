@@ -259,6 +259,10 @@ public:
             if(e.image==img && e.height==height && e.palette==tex.tile.palette && e.mode==mode
                && std::equal(e.source.begin(),e.source.end(),source.begin(),source.end())
                && (format!=2 || e.tmem==tmem.bytes)) {hit=&e;break;}
+        if(format==2 && size==1 && mode==2) {
+            tex.palette.reserve(256);
+            for(unsigned i=0;i<256;++i)tex.palette.push_back(rgba16(tmem.palette(i)));
+        }
         unsigned texture_index;
         if(hit) {
             tex.pixels=hit->pixels;
@@ -282,7 +286,7 @@ public:
             if(cache.size()>=64)cache.erase(cache.begin());
             cache.push_back(std::move(entry));
         }
-        Rectangle r;r.texture=texture_index;
+        Rectangle r;r.texture=texture_index;r.source=img.address;
         r.x0=std::int16_t(half(descriptor+4));r.y0=std::int16_t(half(descriptor+12));
         r.x1=r.x0+half(descriptor+6);r.y1=r.y0+half(descriptor+14);
         if((r.x0&3) || (r.y0&3) || (r.x1&3) || (r.y1&3))

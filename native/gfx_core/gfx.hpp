@@ -50,6 +50,8 @@ struct Texture {
     Tmem memory;
     unsigned tlut_mode = 0;
     std::vector<Color> pixels;
+    // CI8 backgrounds: the 256-entry palette they were decoded with (HD missions).
+    std::vector<Color> palette;
 };
 constexpr unsigned no_texture = 0xffffffffu;
 struct Rectangle {
@@ -61,6 +63,7 @@ struct Rectangle {
     Image target;
     State state;
     std::uint32_t source_pc = 0;
+    std::uint32_t source = 0; // backgrounds: physical address of the source image
 };
 // Integer pixels a rectangle may write: its edges intersected with the
 // quarter-pixel scissor and the target width. Ends are exclusive.

@@ -4,6 +4,9 @@
 #if defined(SC64_VOICES)
 #include "voices.hpp"
 #endif
+#if defined(SC64_MUSIC)
+#include "music.hpp"
+#endif
 #include <recomp.h>
 #include <algorithm>
 #include <mutex>
@@ -80,6 +83,19 @@ std::uint32_t hint_pixels(const std::uint8_t* ram, std::uint32_t pixels,
 // view keeps its place relative to the 320-wide layout: those nearer the right
 // edge stay as far from it, centred and free-standing ones move by half the
 // extra width, and those along the left edge stay.
+// PC music (music.hpp; tools/recompile/apply_music_hook.py): the ADPCM decoder
+// 0x80094CDC asks for each voice whether to mute it. Voice +8 is its stream's ROM
+// address, +0x4C/+0x50 its left/right volume.
+extern "C" int sc64_music_voice(std::uint8_t* ram, std::uint32_t voice) {
+#if defined(SC64_MUSIC)
+    if (!address(voice, 0x54)) return 0;
+    return sc64::music::guest_voice(word(ram, voice + 8), std::int32_t(word(ram, voice + 0x4c)),
+                                    std::int32_t(word(ram, voice + 0x50)));
+#else
+    (void)ram; (void)voice;
+    return 0;
+#endif
+}
 extern "C" void sc64_ws_dialog(std::uint8_t* ram, std::uint32_t dialog) {
     if (!address(dialog,0x10) || half(ram,0x800a5af0)!=sc64_ws_width) return;
     const int x=half(ram,dialog+4), w=half(ram,dialog+0xc);

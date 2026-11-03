@@ -161,3 +161,8 @@ std::vector<std::uint8_t> sc64_read_bundled_rom() {
     throw std::runtime_error("Bundled-ROM loading is available in Android APK builds");
 }
 #endif
+bool sc64_platform_thread(void (*entry)()) {
+    try { std::thread(entry).detach(); return true; } catch (const std::system_error&) { return false; }
+}
+void sc64_platform_heavy_begin() {}
+void sc64_platform_heavy_end() {}

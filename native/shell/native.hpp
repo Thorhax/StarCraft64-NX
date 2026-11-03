@@ -1,4 +1,5 @@
 #pragma once
+#include "hd.hpp"
 #include "scripts.hpp"
 #include "session.hpp"
 #include "cursor_feedback.hpp"
@@ -10,6 +11,7 @@
 #include <cstdint>
 #include <fstream>
 #include <functional>
+#include <map>
 #include <memory>
 #include <string>
 #include <thread>
@@ -105,6 +107,9 @@ private:
     std::shared_ptr<const desktop::CpuScanout> cpu_source_;
     std::shared_ptr<const desktop::ScanoutImage> cpu_image_;
     desktop::ViRegion presented_region_;
+    // HD mission canvases by N64 canvas address, latest first taken (hd.hpp).
+    std::map<std::uint32_t, std::shared_ptr<const hd::Frame>> hd_frames_;
+    std::uint64_t hd_presented_ = 0;
     bool scanout_visible_ = false;
     unsigned trace_readbacks_ = 0, trace_readback_tail_ = 0;
     bool trace_last_visible_ = false;

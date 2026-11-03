@@ -159,6 +159,7 @@ std::optional<Native::Upload> Native::tick() {
                 fixture = gfx::render_software(*frame);
             }
             const auto& result = rendered ? rendered->pixels : fixture;
+            if (rendered) for (const auto& hd_frame : rendered->hd) hd_frames_[hd_frame->canvas] = hd_frame;
             std::vector<gfx::Image> targets;
             if (probe) targets.push_back(frame->rectangles.back().target);
             else for (const auto& rect : frame->rectangles)
@@ -179,6 +180,12 @@ std::optional<Native::Upload> Native::tick() {
                 image->rgba = gfx::target_rgba(result.ram, target, frame_height);
                 // Native RDP alpha carries coverage; presentation is opaque.
                 for (std::size_t i = 3; i < image->rgba.size(); i += 4) image->rgba[i] = 255;
+                if (!probe && !hd_frames_.empty()) {
+                    hd::Frames known;
+                    for (const auto& [canvas, hd_frame] : hd_frames_) known.push_back(hd_frame);
+                    if (auto composite = hd::compose(*frame, known, image->rgba, target, frame_height))
+                        image->hd = std::move(*composite);
+                }
                 scanout_images_.add(image);
                 if (probe) { uploaded_image_.reset(); cpu_image_ = image; }
             }
@@ -225,8 +232,11 @@ std::optional<Native::Upload> Native::tick() {
         const auto frame_height = image->height;
         presented_region_ = probe ? desktop::ViRegion{target.width, frame_height}
                                   : desktop::vi_region(scanout_, target.width, frame_height);
-        auto rgba = std::make_shared<std::vector<std::uint8_t>>(
-            desktop::vi_present(image->rgba, target.width, frame_height, presented_region_));
+        // An HD mission frame is twice the size; the logical size stays the N64 one.
+        const bool hd_image = !image->hd.empty() && presented_region_ == desktop::ViRegion{target.width, frame_height};
+        auto rgba = std::make_shared<std::vector<std::uint8_t>>(hd_image ? image->hd
+            : desktop::vi_present(image->rgba, target.width, frame_height, presented_region_));
+        if (hd_image) ++hd_presented_;
         if (tracing) {
             // CPU frames share their preceding task number; name them apart.
             const auto name = (image == cpu_image_ && !probe ? "cpu-" + std::to_string(scanout_.revision) + "-after-"
@@ -252,7 +262,7 @@ std::optional<Native::Upload> Native::tick() {
         width_ = target.width; height_ = frame_height;
         uploaded_image_ = image;
         upload_bytes_ += rgba->size(); ++presented_;
-        return Upload{std::move(rgba), width_, height_};
+        return Upload{std::move(rgba), hd_image ? width_ * 2 : width_, hd_image ? height_ * 2 : height_};
     } catch (const std::exception& error) {
         log::error("%s", error.what());
         session().fail(error.what());
@@ -386,7 +396,7 @@ nlohmann::json Native::telemetry() {
     auto result = to_json(info());
     result.update({{"tasks", s.tasks.load()}, {"samples", s.samples.load()},
         {"host_seconds", std::chrono::duration<double>(std::chrono::steady_clock::now() - host_started_).count()},
-        {"scanout_visible", scanout_visible_}, {"vi_revision", scanout_.revision}, {"vi_width", scanout_.regs[2]},
+        {"scanout_visible", scanout_visible_}, {"hd_presented", hd_presented_}, {"vi_revision", scanout_.revision}, {"vi_width", scanout_.regs[2]},
         {"vi_origin", scanout_.regs[1]}, {"cpu_swaps", s.cpu_swaps.load()}, {"vi_rows", presented_region_.height},
         {"render_driver", window_.renderer()}, {"upload_bytes", upload_bytes_}, {"software_ms", software_ms_},
         {"software_service_ms", software_service_ms_}, {"raster_helpers", s.raster ? s.raster->helpers() : 0},
