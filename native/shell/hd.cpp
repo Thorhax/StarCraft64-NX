@@ -241,9 +241,21 @@ void call_render(std::uint8_t* rdram, const recomp_context* ctx, const Canvas& c
 // Index 0 (black) marks the dark beyond the map; presentation keeps the N64 pixels there.
 // Rows are assembled in guest byte order (each 4-byte group reversed, as RDRAM holds
 // them), so aligned megatile spans are plain copies.
+// The last terrain drawn, reused while the camera stands still (most frames).
+struct TerrainCache { int cam_x = 0, cam_y = 0, vx = 0, vy = 0; unsigned w = 0, h = 0, era = 0; std::uint32_t tiles = 0;
+                      std::vector<std::uint8_t> bytes; };
+TerrainCache terrain_cache;
 void draw_terrain(std::uint8_t* rdram, const Canvas& c, int cam_x, int cam_y, int vx, int vy) {
     const Tileset& t = tileset_data[map.era];
     const unsigned w = c.width * 2, h = c.height * 2;
+    TerrainCache& cache = terrain_cache;
+    if (cache.cam_x == cam_x && cache.cam_y == cam_y && cache.vx == vx && cache.vy == vy && cache.w == w && cache.h == h
+        && cache.era == map.era && cache.tiles == map.tiles && cache.bytes.size() == std::size_t(w) * h) {
+        std::memcpy(rdram + offset(c.pixels), cache.bytes.data(), cache.bytes.size());
+        return;
+    }
+    cache = {cam_x, cam_y, vx, vy, w, h, map.era, map.tiles, std::move(cache.bytes)};
+    cache.bytes.resize(std::size_t(w) * h);
     const std::size_t groups = t.cv5.size() / 52;
     std::vector<std::uint8_t> row(w + 4);
     for (unsigned y = 0; y < h; ++y) {
@@ -274,8 +286,9 @@ void draw_terrain(std::uint8_t* rdram, const Canvas& c, int cam_x, int cam_y, in
                 x += int(run);
             }
         }
-        std::memcpy(rdram + offset(c.pixels + y * w), row.data(), w);
+        std::memcpy(cache.bytes.data() + std::size_t(y) * w, row.data(), w);
     }
+    std::memcpy(rdram + offset(c.pixels), cache.bytes.data(), cache.bytes.size());
 }
 }
 
@@ -367,57 +380,88 @@ std::optional<std::vector<std::uint8_t>> compose(const gfx::DrawList& list, cons
     const auto bounds = gfx::raster_bounds(*bg);
     const int s0 = bg->s >> 5, t0 = bg->t >> 5, x0 = bg->x0 / 4, y0 = bg->y0 / 4;
     const unsigned fw = frame->canvas_width * 2;
+    // Pass 1: each canvas pixel's fog alpha (0..256), or -1 where the RDP drew over
+    // the canvas (HUD, cursor) or outside the background.
+    std::vector<std::int16_t> alpha(std::size_t(w) * h, -1);
+    const int pc[3] = {fog_r, fog_g, fog_b};
+    for (unsigned y = 0; y < h; ++y) {
+        const int v = t0 + int(y) - y0;
+        if (int(y) < bounds.y0 || int(y) >= bounds.y1 || v < 0 || v >= int(frame->canvas_height) || v >= int(tex.height))
+            continue;
+        const std::uint8_t* row = canvas + std::size_t(v) * frame->canvas_width;
+        for (unsigned x = 0; x < w; ++x) {
+            const int u = s0 + int(x) - x0;
+            if (int(x) < bounds.x0 || int(x) >= bounds.x1 || u < 0 || u >= int(frame->canvas_width) || u >= int(tex.width))
+                continue;
+            const std::uint32_t pixel = in[std::size_t(y) * w + x] | 0xff000000u, b = palette[row[u]];
+            std::int16_t& a = alpha[std::size_t(y) * w + x];
+            if (pixel == b) { a = 0; continue; }
+            if (pixel == fog_pixel) { a = 256; continue; }
+            // The RDP blends the canvas toward the fog colour (fog of war, the map's
+            // edges): solve for that blend; anything else was drawn over the canvas.
+            const int bc[3] = {int(b & 255), int(b >> 8 & 255), int(b >> 16 & 255)};
+            const int fc[3] = {int(pixel & 255), int(pixel >> 8 & 255), int(pixel >> 16 & 255)};
+            int k = 0;
+            for (int c = 1; c < 3; ++c) if (std::abs(bc[c] - pc[c]) > std::abs(bc[k] - pc[k])) k = c;
+            const int span = bc[k] - pc[k];
+            const int value = std::abs(span) < 8 ? 256 : std::clamp((bc[k] - fc[k]) * 256 / span, 0, 256);
+            bool fits = true;
+            for (int c = 0; c < 3; ++c) fits &= std::abs((bc[c] - fc[c]) * 256 - value * (bc[c] - pc[c])) <= 12 * 256;
+            if (fits) a = std::int16_t(value);
+        }
+    }
+    // Pass 2: the RDP dithers the fog; a 3x3 average over the blended pixels
+    // smooths its edges at twice the resolution. Padded by one pixel, separable.
+    const unsigned pw = w + 2, ph = h + 2;
+    std::vector<std::int32_t> sums(std::size_t(pw) * ph, 0), counts(std::size_t(pw) * ph, 0);
+    for (unsigned y = 0; y < h; ++y)
+        for (unsigned x = 0; x < w; ++x) {
+            const int a = alpha[std::size_t(y) * w + x];
+            if (a < 0) continue;
+            const std::size_t i = std::size_t(y + 1) * pw + x + 1;
+            sums[i - 1] += a; sums[i] += a; sums[i + 1] += a;
+            counts[i - 1] += 1; counts[i] += 1; counts[i + 1] += 1;
+        }
+    std::vector<std::int16_t> smooth(std::size_t(pw) * ph, -1);
+    for (unsigned y = 0; y < h; ++y)
+        for (unsigned x = 0; x < w; ++x) {
+            if (alpha[std::size_t(y) * w + x] < 0) continue;
+            const std::size_t i = std::size_t(y + 1) * pw + x + 1;
+            const int sum = sums[i - pw] + sums[i] + sums[i + pw], count = counts[i - pw] + counts[i] + counts[i + pw];
+            smooth[i] = std::int16_t(sum / count);
+        }
+    // Pass 3: each HD pixel with the alpha interpolated toward its neighbours.
     for (unsigned y = 0; y < h; ++y) {
         std::uint32_t* o0 = out + std::size_t(y) * 2 * ow;
         std::uint32_t* o1 = o0 + ow;
         const std::uint32_t* f = in + std::size_t(y) * w;
         const int v = t0 + int(y) - y0;
-        const bool bg_row = int(y) >= bounds.y0 && int(y) < bounds.y1 && v >= 0 && v < int(frame->canvas_height)
-                            && v < int(tex.height);
-        const std::uint8_t* hd0 = bg_row ? frame->pixels.data() + std::size_t(v) * 2 * fw : nullptr;
-        const std::uint8_t* hd1 = hd0 ? hd0 + fw : nullptr;
-        const std::uint8_t* row = bg_row ? canvas + std::size_t(v) * frame->canvas_width : nullptr;
+        const std::int16_t* s = smooth.data() + std::size_t(y + 1) * pw + 1;
         for (unsigned x = 0; x < w; ++x) {
             const std::uint32_t pixel = f[x] | 0xff000000u;
+            const int a = s[x];
+            if (a < 0) { o0[2 * x] = o0[2 * x + 1] = o1[2 * x] = o1[2 * x + 1] = pixel; continue; }
             const int u = s0 + int(x) - x0;
-            if (!bg_row || int(x) < bounds.x0 || int(x) >= bounds.x1 || u < 0 || u >= int(frame->canvas_width)
-                || u >= int(tex.width)) {
-                o0[2 * x] = o0[2 * x + 1] = o1[2 * x] = o1[2 * x + 1] = pixel;
-                continue;
-            }
-            const std::uint32_t b = palette[row[u]];
-            const std::uint8_t q[4] = {hd0[2 * u], hd0[2 * u + 1], hd1[2 * u], hd1[2 * u + 1]};
+            const std::uint8_t* hd0 = frame->pixels.data() + std::size_t(v) * 2 * fw + unsigned(u) * 2;
+            const std::uint8_t* hd1 = hd0 + fw;
+            const std::uint8_t q[4] = {hd0[0], hd0[1], hd1[0], hd1[1]};
             std::uint32_t* const o[4] = {&o0[2 * x], &o0[2 * x + 1], &o1[2 * x], &o1[2 * x + 1]};
-            if (pixel == b) { // the canvas as it is: the HD pixels
-                for (int k = 0; k < 4; ++k) *o[k] = q[k] ? palette[q[k]] : pixel;
+            auto near = [&](int dx, int dy) { const int n = s[int(x) + dx + dy * int(pw)]; return n < 0 ? a : n; };
+            const int l = near(-1, 0), r = near(1, 0), up = near(0, -1), dn = near(0, 1);
+            if (a == 0 && l == 0 && r == 0 && up == 0 && dn == 0 && near(-1, -1) == 0 && near(1, -1) == 0
+                && near(-1, 1) == 0 && near(1, 1) == 0) { // clear of fog: the HD pixels as they are
+                for (int i = 0; i < 4; ++i) *o[i] = q[i] ? palette[q[i]] : pixel;
                 continue;
             }
-            if (pixel == fog_pixel) { // fully fogged
-                for (int k = 0; k < 4; ++k) *o[k] = pixel;
-                continue;
-            }
-            // The RDP blends the canvas toward the fog colour (fog of war, the
-            // map's edges) or draws over it. Keep the same blend over the HD
-            // pixels (alpha in 1/256); anything else stays as drawn.
-            const int bc[3] = {int(b & 255), int(b >> 8 & 255), int(b >> 16 & 255)};
-            const int fc[3] = {int(pixel & 255), int(pixel >> 8 & 255), int(pixel >> 16 & 255)};
-            const int pc[3] = {fog_r, fog_g, fog_b};
-            int k = 0;
-            for (int c = 1; c < 3; ++c) if (std::abs(bc[c] - pc[c]) > std::abs(bc[k] - pc[k])) k = c;
-            const int span = bc[k] - pc[k];
-            int alpha = std::abs(span) < 8 ? 256 : std::clamp((bc[k] - fc[k]) * 256 / span, 0, 256);
-            bool fits = true;
-            for (int c = 0; c < 3; ++c) fits &= std::abs((bc[c] - fc[c]) * 256 - alpha * (bc[c] - pc[c])) <= 12 * 256;
-            if (!fits) {
-                for (int i = 0; i < 4; ++i) *o[i] = pixel;
-                continue;
-            }
-            const int keep = 256 - alpha;
             for (int i = 0; i < 4; ++i) {
-                if (!q[i]) { *o[i] = pixel; continue; }
+                if (!q[i]) { *o[i] = pixel; continue; } // beyond the map: as the N64 drew it
+                const int dx = (i & 1) ? 1 : -1, dy = (i & 2) ? 1 : -1;
+                const int sub = (9 * a + 3 * (dx > 0 ? r : l) + 3 * (dy > 0 ? dn : up) + near(dx, dy)) / 16;
                 const std::uint32_t c = palette[q[i]];
-                *o[i] = pack((int(c & 255) * keep + fog_r * alpha) >> 8, (int(c >> 8 & 255) * keep + fog_g * alpha) >> 8,
-                             (int(c >> 16 & 255) * keep + fog_b * alpha) >> 8);
+                if (sub == 0) { *o[i] = c; continue; }
+                const int keep = 256 - sub;
+                *o[i] = pack((int(c & 255) * keep + fog_r * sub) >> 8, (int(c >> 8 & 255) * keep + fog_g * sub) >> 8,
+                             (int(c >> 16 & 255) * keep + fog_b * sub) >> 8);
             }
         }
     }
