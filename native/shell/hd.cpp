@@ -186,7 +186,7 @@ std::uint64_t images_drawn = 0, frames_taken = 0;
 // Time spent per part, logged every 1800 frames taken.
 using Clock = std::chrono::steady_clock;
 double terrain_ms = 0, image_ms = 0, take_ms = 0, compose_ms = 0;
-std::uint64_t composed = 0;
+std::uint64_t composed = 0, fallbacks = 0;
 double since(Clock::time_point start) { return std::chrono::duration<double, std::milli>(Clock::now() - start).count(); }
 
 std::uint32_t guest_alloc(std::uint8_t* rdram, std::size_t size) {
@@ -322,9 +322,9 @@ Frames take(const std::uint8_t* rdram) {
     if (current && !current->dirty) current = nullptr; // images after the submission are not taken
     take_ms += since(started);
     if (!out.empty() && frames_taken % 1800 == 0)
-        sc64::shell::log::info("hd ms/frame: terrain %.2f images %.2f take %.2f compose %.2f (%.2f per image, %llu) | %.1f images per frame",
+        sc64::shell::log::info("hd ms/frame: terrain %.2f images %.2f take %.2f compose %.2f (%.2f per image, %llu) | %.1f images per frame, %llu N64 fallbacks",
             terrain_ms / 1800, image_ms / 1800, take_ms / 1800, compose_ms / 1800, composed ? compose_ms / double(composed) : 0.0,
-            (unsigned long long)composed, double(images_drawn) / 1800),
+            (unsigned long long)composed, double(images_drawn) / 1800, (unsigned long long)fallbacks),
         terrain_ms = image_ms = take_ms = compose_ms = 0, images_drawn = 0, composed = 0;
     return out;
 }
@@ -429,6 +429,32 @@ std::optional<std::vector<std::uint8_t>> compose(const gfx::DrawList& list, cons
 
 using namespace sc64::hd;
 
+namespace {
+// An image the HD canvas has no PC frame for (or cannot draw): the N64 canvas
+// region its render call may touch, before the call; after it, the pixels the call
+// changed are copied at 2x into the HD canvas, in the same draw order.
+struct Fallback { bool pending = false; std::uint32_t pixels = 0; unsigned stride = 0; int x = 0, y = 0, w = 0, h = 0;
+                  std::vector<std::uint8_t> before; };
+Fallback fallback;
+void begin_fallback(std::uint8_t* rdram, const recomp_context* ctx) {
+    const std::uint32_t descriptor = gw(rdram, render_canvas);
+    if ((descriptor >> 24) != 0x80) return;
+    const std::uint32_t r = std::uint32_t(ctx->r7);
+    fallback.stride = gh(rdram, descriptor);
+    fallback.pixels = gw(rdram, descriptor + 4);
+    fallback.x = std::int32_t(ctx->r4); fallback.y = std::int32_t(ctx->r5);
+    fallback.w = std::int16_t(gh(rdram, r + 4)); fallback.h = std::int16_t(gh(rdram, r + 6));
+    if (fallback.x < 0 || fallback.y < 0 || fallback.w <= 0 || fallback.h <= 0 || fallback.w > 512 || fallback.h > 512
+        || (fallback.pixels >> 24) != 0x80) return;
+    fallback.before.resize(std::size_t(fallback.w) * fallback.h);
+    for (int y = 0; y < fallback.h; ++y)
+        for (int x = 0; x < fallback.w; ++x)
+            fallback.before[std::size_t(y) * fallback.w + x] =
+                gb(rdram, fallback.pixels + std::uint32_t((fallback.y + y) * int(fallback.stride) + fallback.x + x));
+    fallback.pending = true;
+}
+}
+
 // Before the camera renderer's terrain copy (0x8000AE44): a new frame of the
 // current canvas, its PC terrain.
 extern "C" void sc64_hd_terrain(std::uint8_t* rdram, recomp_context*) {
@@ -488,15 +514,12 @@ extern "C" void sc64_hd_image(std::uint8_t* rdram, recomp_context* ctx) {
         return;
     }
     const unsigned id = gh(rdram, image + 8), flags = gh(rdram, image + 0xA);
-    if (id >= 999 || !image_grp[id] || image_grp[id] >= grps.size()) return;
-    const auto& grp = grps[image_grp[id]];
-    if (!grp) return;
-    const unsigned frame_index = (gw(rdram, image + 0xC) >> 6) & 0xFFF;
-    if (frame_index >= grp->frames.size()) return;
-    const GrpFrame& f = grp->frames[frame_index];
-    if (!f.w || !f.h || !f.size || f.size + 8 > scratch_size) return;
     const std::uint32_t sprite = gw(rdram, image + 0x38);
-    if ((sprite >> 24) != 0x80) return;
+    const Grp* grp = id < 999 && image_grp[id] && image_grp[id] < grps.size() ? grps[image_grp[id]].get() : nullptr;
+    const unsigned frame_index = (gw(rdram, image + 0xC) >> 6) & 0xFFF;
+    if (!grp || frame_index >= grp->frames.size() || (sprite >> 24) != 0x80) { begin_fallback(rdram, ctx); return; }
+    const GrpFrame& f = grp->frames[frame_index];
+    if (!f.w || !f.h || !f.size || f.size + 8 > scratch_size) { begin_fallback(rdram, ctx); return; }
     const bool flipped = flags & 0x4000;
     const int hoff = std::int8_t(gb(rdram, image + 0x10)), voff = std::int8_t(gb(rdram, image + 0x11));
     const int sx = std::int16_t(gh(rdram, sprite + 0x14)), sy = std::int16_t(gh(rdram, sprite + 0x16));
@@ -519,4 +542,26 @@ extern "C" void sc64_hd_image(std::uint8_t* rdram, recomp_context* ctx) {
     call_render(rdram, ctx, c, render, x + rx, y + ry, scratch, gw(rdram, image + 0x2C));
     ++images_drawn;
     image_ms += since(started);
+}
+
+// After the image's render call: the N64 pixels of a fallback image, at 2x.
+extern "C" void sc64_hd_image_done(std::uint8_t* rdram, recomp_context*) {
+    if (!fallback.pending) return;
+    fallback.pending = false;
+    std::lock_guard lock(mutex);
+    if (!current || !current->dirty) return;
+    const Canvas& c = *current;
+    const unsigned hw = c.width * 2, hh = c.height * 2;
+    for (int y = 0; y < fallback.h; ++y)
+        for (int x = 0; x < fallback.w; ++x) {
+            const std::uint8_t value =
+                gb(rdram, fallback.pixels + std::uint32_t((fallback.y + y) * int(fallback.stride) + fallback.x + x));
+            if (value == fallback.before[std::size_t(y) * fallback.w + x]) continue;
+            const unsigned hx = unsigned(fallback.x + x) * 2, hy = unsigned(fallback.y + y) * 2;
+            if (hx + 1 >= hw || hy + 1 >= hh) continue;
+            for (unsigned dy = 0; dy < 2; ++dy)
+                for (unsigned dx = 0; dx < 2; ++dx)
+                    rdram[offset((c.pixels + (hy + dy) * hw + hx + dx) ^ 3)] = value;
+        }
+    ++fallbacks;
 }

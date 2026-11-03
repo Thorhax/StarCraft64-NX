@@ -8,6 +8,7 @@ overlay) calls each image's render function. native/shell/hd.cpp redraws the
 same frame at twice the resolution from the user's PC graphics:
   8000AE44  before the terrain copy   sc64_hd_terrain: a new HD frame, PC terrain
   80120270  before the render call    sc64_hd_image: the image's PC frame (s0 = image)
+            after it                    sc64_hd_image_done: an image without a PC frame, at 2x
 Without PC graphics installed both return at once.
 """
 import sys
@@ -19,8 +20,10 @@ SITES = [  # (function signature, instruction comment, call line, hook)
     ('RECOMP_FUNC void sc64_game_8012011C(uint8_t* rdram, recomp_context* ctx) {',
      '// 0x80120270: jalr        $v0', 'LOOKUP_FUNC(ctx->r2)(rdram, ctx);', 'sc64_hd_image(rdram, ctx);'),
 ]
+AFTER = ('LOOKUP_FUNC(ctx->r2)(rdram, ctx);', 'sc64_hd_image_done(rdram, ctx);') # after the render call
 DECL = ('void sc64_hd_terrain(uint8_t* rdram, recomp_context* ctx);\n'
-        'void sc64_hd_image(uint8_t* rdram, recomp_context* ctx);\n')
+        'void sc64_hd_image(uint8_t* rdram, recomp_context* ctx);\n'
+        'void sc64_hd_image_done(uint8_t* rdram, recomp_context* ctx);\n')
 
 def main():
     root = Path(sys.argv[1]); found = 0
@@ -35,7 +38,9 @@ def main():
             at = next(i for i in range(start, len(lines)) if lines[i].strip() == comment)
             for i in range(at, at + 6):
                 if lines[i].strip() == call:
-                    lines[i] = lines[i].replace(call, hook + ' ' + call); found += 1; break
+                    lines[i] = lines[i].replace(call, hook + ' ' + call)
+                    if call == AFTER[0]: lines[i] += ' ' + AFTER[1]
+                    found += 1; break
         text = '\n'.join(lines)
         # After the includes, where recomp_context is declared.
         head, sep, rest = text.partition('\n\n')
