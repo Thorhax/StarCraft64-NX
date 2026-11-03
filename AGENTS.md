@@ -17,7 +17,10 @@ was withdrawn at the user's request on 2026-10-09 (ADR-060). All HD/filter/scale
 choices and settings persistence are removed. Presentation always uses the
 original raster and aspect-preserving Fit, with one viewport for rendering/input.
 The only widescreen guest patch is the requested, opt-in 1P widescreen switch
-(`tools/recompile/apply_widescreen.py`, off by default). The SDL3 shell (ADR-074)
+(`tools/recompile/apply_widescreen.py`, off by default). The current maintainer
+requested PC assets from the user's own files: HD 1P missions (ADR-082,
+`nohd` opts out) and the PC soundtrack (ADR-081, `n64music` opts out); the
+original raster stays the default everywhere else. The SDL3 shell (ADR-074)
 also cross-builds Windows/Linux x86_64; their user acceptance is D-054. Check current documents
 rather than carrying forward an old receipt as proof for a new build or platform.
 

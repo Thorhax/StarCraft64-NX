@@ -262,7 +262,7 @@ std::optional<Native::Upload> Native::tick() {
         width_ = target.width; height_ = frame_height;
         uploaded_image_ = image;
         upload_bytes_ += rgba->size(); ++presented_;
-        return Upload{std::move(rgba), hd_image ? width_ * 2 : width_, hd_image ? height_ * 2 : height_};
+        return Upload{std::move(rgba), hd_image ? width_ * 2 : width_, hd_image ? height_ * 2 : height_, hd_image};
     } catch (const std::exception& error) {
         log::error("%s", error.what());
         session().fail(error.what());

@@ -1931,3 +1931,52 @@ baseline binaries.
 reconfigures and rebuilds the existing tree. Release was compiled and the 18
 desktop CTest cases passed on macOS; Windows, Linux and Android Release builds
 were not rebuilt here.
+
+## ADR-081 — PC soundtrack in place of the N64 music streams (ACCEPTED)
+
+**Context:** The user asked for the higher-quality PC music. The N64 streams
+are 11 kHz mono IMA ADPCM cuts of the CD recordings (research.md, "Music
+streams"); the user owns the CDs.
+
+**Decision:** `tools/recompile/apply_music_hook.py` makes the stream decoder
+`0x80094CDC` call `sc64_music_voice` per voice; when the shell plays a PC
+version of that stream, the two volume loads read 0, so the guest keeps its
+stream position and timing but adds nothing to the mix. `native/shell/music.cpp`
+follows the guest's track, volume and stops, decodes the Ogg files from
+`tools/music/extract_music.py` with FFmpeg on its own thread and mixes them after
+the game gain, below the voices. Themes are not cut when the guest switches to
+the race's next theme: the PC race playlist plays each theme to its end, as on
+PC. Jingles play out once. `n64music` keeps the original.
+
+**Consequences:** Builds with FFmpeg (Switch portlibs; desktop with
+`-DSC64_DESKTOP_FFMPEG=ON`) can play the PC music; others keep the N64 streams.
+Three N64-only cues stay N64. The desktop option is off by default so the
+distributed desktop builds keep their library set.
+
+## ADR-082 — HD missions drawn with the game's own render functions (ACCEPTED)
+
+**Context:** The user asked for the PC's higher-resolution graphics. ADR-060
+withdrew the earlier presentation experiments (filters, scaling, HD fonts) at
+the previous maintainer's request; this is a new, explicit request from the
+current maintainer, scoped to the 1P mission view and opt-out.
+
+**Decision:** Two hooks (`tools/recompile/apply_hd_hooks.py`) mirror the guest's
+own drawing: before the terrain copy a new HD canvas (2× the N64 canvas, in
+guest heap memory) gets PC terrain from the map's MTXM and PC tileset; before
+each image render call the image's PC frame (from Brood War's `images.dat`,
+same IDs) is converted to the game's frame layout and drawn by the same guest
+render function on the HD canvas, so shadows, remaps, player colours, cloaking
+and selection circles keep the game's semantics. Health bars get the game's own
+placement at 2×. Finished HD canvases are taken at task submission with a hash
+of their N64 canvas, carried with the rendered frame, and composed in
+`Native::tick`: each canvas pixel the RDP left unchanged becomes its HD 2×2
+block, a pixel blended toward the fog colour gets the same blend over the HD
+block, and anything else (HUD, cursor, overlays) stays as drawn. HD frames are
+scaled with linear filtering (an exact 3:2 path on the Switch framebuffer);
+everything else keeps nearest sampling. `nohd` keeps the original.
+
+**Consequences:** No gameplay or timing changes; on the Switch the hooks cost
+~1.6 ms per frame on the guest core (56 instead of 60 graphics tasks per second
+in Wasteland) and composition runs on core 2 to keep the graphics thread on
+core 0 free. Split-screen, menus and briefings keep the N64 graphics. Frames
+whose canvas does not match the HD frame fall back to the N64 image.

@@ -158,6 +158,11 @@ public:
                 xmap_source_ = w;
             }
             const auto* src = reinterpret_cast<const std::uint32_t*>(image_->rgba->data());
+            if (image_->smooth && dw * 2 == w * 3 && dh * 2 == h * 3) { // HD missions: exact 3:2 linear
+                linear_3_2(src, w, h, base, stride, ox, oy);
+                framebufferEnd(&fb_);
+                return;
+            }
             unsigned previous = ~0u;
             for (unsigned y = 0; y < dh; ++y) {
                 const unsigned sy = unsigned(std::uint64_t(y) * h / dh);
@@ -175,6 +180,28 @@ public:
         framebufferEnd(&fb_);
     }
 private:
+    // Three output pixels for every two source pixels, both ways: the outer ones copy
+    // their source pixel, the middle one averages its two neighbours.
+    static std::uint32_t mean(std::uint32_t a, std::uint32_t b) { return ((a & 0xfefefefeu) >> 1) + ((b & 0xfefefefeu) >> 1); }
+    static void linear_3_2(const std::uint32_t* src, unsigned w, unsigned h, std::uint8_t* base, u32 stride,
+                           unsigned ox, unsigned oy) {
+        auto row = [&](unsigned y) { return reinterpret_cast<std::uint32_t*>(base + std::size_t(oy + y) * stride) + ox; };
+        auto widen = [&](const std::uint32_t* in, std::uint32_t* out) {
+            for (unsigned x = 0; x + 1 < w; x += 2) {
+                const std::uint32_t a = in[x] | 0xff000000u, b = in[x + 1] | 0xff000000u;
+                out[0] = a; out[1] = mean(a, b); out[2] = b; out += 3;
+            }
+        };
+        const unsigned dw = w * 3 / 2;
+        for (unsigned y = 0; y + 1 < h; y += 2) {
+            std::uint32_t* top = row(y / 2 * 3);
+            std::uint32_t* middle = row(y / 2 * 3 + 1);
+            std::uint32_t* bottom = row(y / 2 * 3 + 2);
+            widen(src + std::size_t(y) * w, top);
+            widen(src + std::size_t(y + 1) * w, bottom);
+            for (unsigned x = 0; x < dw; ++x) middle[x] = mean(top[x], bottom[x]);
+        }
+    }
     Framebuffer fb_{};
     bool ready_ = false;
     std::optional<Native::Upload> image_;

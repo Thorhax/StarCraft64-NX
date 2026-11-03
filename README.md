@@ -1,7 +1,8 @@
-# StarCraft 64 — Nintendo Switch port (v1.4)
+# StarCraft 64 — Nintendo Switch port (v1.5)
 
 Native **Nintendo Switch (Horizon / Atmosphère)** port of StarCraft 64, with
-widescreen missions, the PC cinematics and the PC voice acting.
+widescreen missions and, from your own StarCraft PC files, high-resolution
+mission graphics, the PC soundtrack, the PC cinematics and the PC voice acting.
 
 This project continues **[gabryboy12-ai's StarCraft64-NX](https://github.com/gabryboy12-ai/StarCraft64-NX)**,
 the original Switch port (v0.5–v1.3: libnx shell, GPU renderer, asynchronous
@@ -16,6 +17,22 @@ Their full commit history is kept in this repository. Thank you both.
 > included) are generated on your machine and are never committed or distributed.
 
 ---
+
+## What's new in v1.5
+
+- **HD missions** (optional): the mission view is drawn again at twice the
+  resolution (640×480, or 832×480 in widescreen) with the PC graphics: PC
+  terrain tilesets, units, buildings, doodads, effects, shadows, selection
+  circles and health bars, in their own player colours. The game itself is
+  unchanged: the same frames, positions and draw order as on the N64, only with
+  the PC artwork; fog of war, the HUD and the cursor are kept as the N64 draws
+  them. Scaled smoothly to the screen. From your own PC install (section 11).
+- **PC soundtrack** (optional): the 16-bit 22 kHz stereo music of StarCraft
+  and Brood War replaces the N64's 11 kHz mono versions. Each N64 track was
+  matched to its PC original; menus play the PC title, missions the full PC
+  race themes one after another (as on PC), victories and defeats the PC
+  jingles. The game's music volume and fades still apply. From your own CDs
+  (section 10).
 
 ## What's new in v1.4
 
@@ -169,7 +186,7 @@ Without it the NRO still builds and runs with the software renderer.
 ### 5. Recompile, prepare the runtime, build
 
 ```bash
-make recompile ROM="$ROM"      # also adds the widescreen switch (tools/recompile/apply_widescreen.py)
+make recompile ROM="$ROM"      # also adds the widescreen switch, the PC music and the HD mission hooks
 python3 tools/recompile/patch_runtime.py third_party/N64ModernRuntime local/deps/N64ModernRuntime
 python3 tools/recompile/patch_host_runtime.py local/deps/N64ModernRuntime
 python3 -c "import sys; sys.path.insert(0,'tools/desktop'); import patch_shell_runtime as p; from pathlib import Path; p.prepare(Path('local/deps/N64ModernRuntime'), Path('local/deps/N64ModernRuntime-shell'))"
@@ -286,6 +303,39 @@ STORMLIB=$PWD/StormLib/build/libstorm.so python3 tools/voices/extract_movies.py 
 Copy `local/movies` (28 `.smk` files, about 580 MB) to the SD card as
 `switch/StarCraft64/movies`. `sc64.log` shows `movie: 28 movies installed, enabled`.
 
+### 10. PC soundtrack (optional)
+
+The music comes from the **classic StarCraft / Brood War CD install**
+(`CampnSC.dat`, `CampnBW.dat`, as for the cinematics) or a `music` folder of
+`.wav` files. With StormLib built as in section 9:
+
+```bash
+sudo apt install -y ffmpeg python3-numpy
+STORMLIB=$PWD/StormLib/build/libstorm.so python3 tools/music/extract_music.py /mnt/c/path/to/StarCraft local/music
+```
+
+It writes 19 Ogg Vorbis files (about 36 MB): the title, victory and defeat
+jingles, the nine race themes and the three Brood War themes (cut from the
+front of Brood War's own `terran1`/`zerg1`/`protoss1`). Copy `local/music` to the
+SD card as `switch/StarCraft64/music`. `sc64.log` shows
+`music: PC music for 13 of 13 N64 tracks` and one `music: <track>` line per
+change. Three short N64-only cues (no PC counterpart) stay as they are.
+
+### 11. HD graphics (optional)
+
+The graphics come from `StarDat.mpq` and `BrooDat.mpq` of a classic StarCraft
+install (1.16; the Remastered edition stores its graphics differently):
+
+```bash
+STORMLIB=$PWD/StormLib/build/libstorm.so python3 tools/hd/extract_graphics.py /mnt/c/path/to/StarCraft local/hd
+```
+
+It copies the image table, the eight terrain tilesets and every unit, building
+and effect graphic (867 files, about 25 MB). Copy `local/hd` to the SD card as
+`switch/StarCraft64/hd`. `sc64.log` shows `hd: 833 PC graphics, 8 tilesets`
+at start-up and `hd: map 64x64, badlands, ...` when a mission starts. One-player
+missions only; split-screen keeps the N64 graphics.
+
 ### Option files
 
 Empty files in `switch/StarCraft64/` change the port's behaviour without
@@ -296,6 +346,8 @@ rebuilding. A `.txt` extension is fine (`widescreen.txt` works like `widescreen`
 | `widescreen` | widescreen missions (416×240); `sc64.log` shows `widescreen: 416x240 missions` |
 | `nomovies` | no PC cinematics, even when installed |
 | `novoices` | no voice playback, even when the voice files are installed |
+| `n64music` | the N64 music, even when the PC soundtrack is installed |
+| `nohd` | the N64 mission graphics, even when the PC graphics are installed |
 | `lockcheats` | keep the original cheat unlocks |
 | `volume` | not empty: one number, the game volume factor (default `4`; `1` = original level) |
 | `softraster` | CPU renderer (v0.5 behaviour), GPU unused |

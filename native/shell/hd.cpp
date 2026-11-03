@@ -6,7 +6,6 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
-#include <cstdlib>
 #include <chrono>
 #include <cstring>
 #include <filesystem>
@@ -24,6 +23,7 @@ constexpr std::uint32_t view_x = 0x800A5B0A, view_y = 0x800A5B0C;    // u16 canv
 constexpr std::uint32_t map_size = 0x800B1D44 + 0xE4;                // u16 tiles wide, high
 constexpr std::uint32_t tile_array = 0x800A2ED4;                     // the game's own (N64) tile array
 constexpr std::uint32_t render_canvas = 0x800AFD60;                  // canvas the render functions draw to
+constexpr std::uint32_t hp_bar = 0x80029CC0;                         // render function of health bars (11, 18)
 // Fog of war (and the dark beyond the map) blends the canvas toward this colour.
 constexpr int fog_r = 16, fog_g = 0, fog_b = 16;
 constexpr const char* tilesets[8] = {"badlands", "platform", "install", "ashworld", "jungle", "desert", "ice", "twilight"};
@@ -218,6 +218,24 @@ const std::uint8_t* megatile(unsigned mega) {
             }
     }
     return mega_cache.pixels.data() + std::size_t(mega_cache.slot[mega]) * 1024;
+}
+
+// Calls a guest render function on an HD canvas: (x, y) in HD pixels, frame a guest
+// frame header, the clip rectangle at rect, colouring data as the fifth argument.
+void call_render(std::uint8_t* rdram, const recomp_context* ctx, const Canvas& c, std::uint32_t render, int x, int y,
+                 std::uint32_t frame, std::uint32_t colour) {
+    recomp_func_t* function = get_function(std::int32_t(render));
+    if (!function) return;
+    recomp_context call = *ctx;
+    const std::uint32_t sp = (std::uint32_t(ctx->r29) - 0x400) & ~7u;
+    call.r29 = gpr(std::int32_t(sp));
+    call.r4 = gpr(std::int32_t(x)); call.r5 = gpr(std::int32_t(y));
+    call.r6 = gpr(std::int32_t(frame)); call.r7 = gpr(std::int32_t(rect));
+    sw(rdram, sp + 0x10, colour);
+    const std::uint32_t saved = gw(rdram, render_canvas);
+    sw(rdram, render_canvas, c.descriptor);
+    function(rdram, &call);
+    sw(rdram, render_canvas, saved);
 }
 
 // Index 0 (black) marks the dark beyond the map; presentation keeps the N64 pixels there.
@@ -458,6 +476,17 @@ extern "C" void sc64_hd_image(std::uint8_t* rdram, recomp_context* ctx) {
     std::lock_guard lock(mutex);
     if (!current || !current->dirty) return;
     const std::uint32_t image = std::uint32_t(ctx->r16), render = std::uint32_t(ctx->r2);
+    const Canvas& c = *current;
+    if (render == hp_bar) {
+        // Health bars are drawn from the unit and the clip rectangle, not from a
+        // frame: the game's own placement and rectangle at twice the size.
+        const std::uint32_t r = std::uint32_t(ctx->r7);
+        sh(rdram, rect, std::uint16_t(2 * gh(rdram, r))); sh(rdram, rect + 2, std::uint16_t(2 * gh(rdram, r + 2)));
+        sh(rdram, rect + 4, std::uint16_t(2 * gh(rdram, r + 4))); sh(rdram, rect + 6, std::uint16_t(2 * gh(rdram, r + 6)));
+        call_render(rdram, ctx, c, render, 2 * std::int32_t(ctx->r4), 2 * std::int32_t(ctx->r5), std::uint32_t(ctx->r6),
+                    gw(rdram, std::uint32_t(ctx->r29) + 0x10));
+        return;
+    }
     const unsigned id = gh(rdram, image + 8), flags = gh(rdram, image + 0xA);
     if (id >= 999 || !image_grp[id] || image_grp[id] >= grps.size()) return;
     const auto& grp = grps[image_grp[id]];
@@ -474,7 +503,6 @@ extern "C" void sc64_hd_image(std::uint8_t* rdram, recomp_context* ctx) {
     int x = sx + hoff + (flipped ? int(grp->width / 2) - f.x - f.w : f.x - int(grp->width / 2));
     int y = sy + voff - int(grp->height / 2) + f.y;
     if (flags & 0x2000) y = std::int16_t(gh(rdram, image + 0x1E)); // positioned by the game
-    const Canvas& c = *current;
     x += 2 * gh(rdram, view_x) - std::int32_t(gw(rdram, camera_x));
     y += 2 * gh(rdram, view_y) - std::int32_t(gw(rdram, camera_y));
     const int cw = int(c.width) * 2, ch = int(c.height) * 2;
@@ -488,18 +516,7 @@ extern "C" void sc64_hd_image(std::uint8_t* rdram, recomp_context* ctx) {
     put(rdram, scratch + 8, grp->data.data() + f.offset, f.size);
     sh(rdram, rect, std::uint16_t(rx)); sh(rdram, rect + 2, std::uint16_t(ry));
     sh(rdram, rect + 4, std::uint16_t(rw)); sh(rdram, rect + 6, std::uint16_t(rh));
-    recomp_func_t* function = get_function(std::int32_t(render));
-    if (!function) return;
-    recomp_context call = *ctx;
-    const std::uint32_t sp = (std::uint32_t(ctx->r29) - 0x400) & ~7u;
-    call.r29 = gpr(std::int32_t(sp));
-    call.r4 = gpr(std::int32_t(x + rx)); call.r5 = gpr(std::int32_t(y + ry));
-    call.r6 = gpr(std::int32_t(scratch)); call.r7 = gpr(std::int32_t(rect));
-    sw(rdram, sp + 0x10, gw(rdram, image + 0x2C)); // colouring data
-    const std::uint32_t saved = gw(rdram, render_canvas);
-    sw(rdram, render_canvas, c.descriptor);
-    function(rdram, &call);
-    sw(rdram, render_canvas, saved);
+    call_render(rdram, ctx, c, render, x + rx, y + ry, scratch, gw(rdram, image + 0x2C));
     ++images_drawn;
     image_ms += since(started);
 }

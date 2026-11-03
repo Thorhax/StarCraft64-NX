@@ -184,6 +184,7 @@ void Video::ensure_texture(unsigned width, unsigned height) {
 
 void Video::upload(const Native::Upload& image) {
     ensure_texture(image.width, image.height);
+    SDL_SetTextureScaleMode(texture_, image.smooth ? SDL_SCALEMODE_LINEAR : SDL_SCALEMODE_NEAREST);
     if (!SDL_UpdateTexture(texture_, nullptr, image.rgba->data(), int(image.width * 4))) fail("Presentation upload");
     last_ = image;
 }

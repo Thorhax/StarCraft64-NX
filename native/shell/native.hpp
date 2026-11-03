@@ -38,7 +38,9 @@ public:
     // Validates configuration and opens diagnostic outputs; throws on misuse.
     void initialize();
     // One presentation step. Returns the image to upload when it changed.
-    struct Upload { std::shared_ptr<const std::vector<std::uint8_t>> rgba; unsigned width = 0, height = 0; };
+    // smooth: an HD mission frame (hd.hpp), scaled with linear filtering; the original
+    // raster keeps nearest sampling.
+    struct Upload { std::shared_ptr<const std::vector<std::uint8_t>> rgba; unsigned width = 0, height = 0; bool smooth = false; };
     std::optional<Upload> tick();
     // Called after drawing and before presenting; may read the window back.
     void after_render(const std::function<Readback()>& readback);

@@ -183,6 +183,9 @@ void GlVideo::draw(bool visible) {
                 glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, GLsizei(w), GLsizei(h), GL_RGBA, GL_UNSIGNED_BYTE,
                                 image_->rgba->data());
             }
+            const GLint filter = image_->smooth ? GL_LINEAR : GL_NEAREST; // HD missions: linear
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filter);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter);
             dirty_ = false;
         }
         // Fit: the same geometry as the framebuffer path and the touch mapping.
