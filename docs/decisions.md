@@ -1960,23 +1960,30 @@ withdrew the earlier presentation experiments (filters, scaling, HD fonts) at
 the previous maintainer's request; this is a new, explicit request from the
 current maintainer, scoped to the 1P mission view and opt-out.
 
-**Decision:** Two hooks (`tools/recompile/apply_hd_hooks.py`) mirror the guest's
-own drawing: before the terrain copy a new HD canvas (2× the N64 canvas, in
-guest heap memory) gets PC terrain from the map's MTXM and PC tileset; before
-each image render call the image's PC frame (from Brood War's `images.dat`,
-same IDs) is converted to the game's frame layout and drawn by the same guest
-render function on the HD canvas, so shadows, remaps, player colours, cloaking
-and selection circles keep the game's semantics. Health bars get the game's own
-placement at 2×. Finished HD canvases are taken at task submission with a hash
-of their N64 canvas, carried with the rendered frame, and composed in
+**Decision:** Hooks (`tools/recompile/apply_hd_hooks.py`) mirror the guest's
+own drawing. Before the terrain copy a new HD canvas (2× the N64 canvas, in
+guest heap memory) gets PC terrain drawn from the game's own tile array: each
+N64 minitile becomes the PC minitile learned from the map's PC MTXM where both
+agree, otherwise the PC minitile with the closest half-size look, so creep and
+other runtime tile changes appear (the tileset comes from the chk's ERA, or
+from the mission palette when no chk is in memory). Before each image render
+call the image's PC frame (from Brood War's `images.dat`, same IDs) is
+converted to the game's frame layout and drawn by the same guest render
+function on the HD canvas, so shadows, remaps, player colours, cloaking and
+selection circles keep the game's semantics; health bars get the game's own
+placement at 2×; an image without a PC frame keeps the pixels its N64 draw
+changed, doubled. Finished HD canvases are taken at task submission with a
+hash of their N64 canvas, carried with the rendered frame, and composed in
 `Native::tick`: each canvas pixel the RDP left unchanged becomes its HD 2×2
-block, a pixel blended toward the fog colour gets the same blend over the HD
-block, and anything else (HUD, cursor, overlays) stays as drawn. HD frames are
-scaled with linear filtering (an exact 3:2 path on the Switch framebuffer);
-everything else keeps nearest sampling. `nohd` keeps the original.
+block; a pixel blended toward the fog colour gets the same blend, with the
+dithered fog alpha averaged over 3×3 pixels and interpolated per HD pixel;
+pixels under the smaller RDP rectangles drawn after the background (minimap,
+HUD, cursor) stay as drawn unless untouched. HD frames are scaled with linear
+filtering (an exact 3:2 path on the Switch framebuffer); everything else keeps
+nearest sampling. `nohd` keeps the original.
 
 **Consequences:** No gameplay or timing changes; on the Switch the hooks cost
-~1.6 ms per frame on the guest core (56 instead of 60 graphics tasks per second
-in Wasteland) and composition runs on core 2 to keep the graphics thread on
-core 0 free. Split-screen, menus and briefings keep the N64 graphics. Frames
+~1.1 ms per frame on the guest core (57 instead of 60 graphics tasks per second
+in Wasteland; the terrain is reused while the camera stands still) and
+composition (~7 ms) runs on core 2 to keep the graphics thread on core 0 free. Split-screen, menus and briefings keep the N64 graphics. Frames
 whose canvas does not match the HD frame fall back to the N64 image.
