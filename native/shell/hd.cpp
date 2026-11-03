@@ -22,6 +22,8 @@ constexpr std::uint32_t camera_x = 0x800A2EE8, camera_y = 0x800A2EEC; // s32, PC
 constexpr std::uint32_t view_x = 0x800A5B0A, view_y = 0x800A5B0C;    // u16 canvas offset of the view
 constexpr std::uint32_t map_size = 0x800B1D44 + 0xE4;                // u16 tiles wide, high
 constexpr std::uint32_t tile_array = 0x800A2ED4;                     // the game's own (N64) tile array
+constexpr std::uint32_t n64_megatiles = 0x800A2ED0, n64_minitiles = 0x800A2ED8; // its megatile and minitile tables
+constexpr std::uint32_t mission_palette = 0x800A5F30;                // RGBA16, the tileset's palette
 constexpr std::uint32_t render_canvas = 0x800AFD60;                  // canvas the render functions draw to
 constexpr std::uint32_t hp_bar = 0x80029CC0;                         // render function of health bars (11, 18)
 // Fog of war (and the dark beyond the map) blends the canvas toward this colour.
@@ -53,7 +55,12 @@ std::uint64_t mix(std::uint64_t hash, std::uint32_t word) { return (hash ^ word)
 // ---- PC graphics
 struct GrpFrame { std::uint8_t x, y, w, h; std::uint32_t offset, size; };
 struct Grp { unsigned width = 0, height = 0; std::vector<GrpFrame> frames; std::vector<std::uint8_t> data; };
-struct Tileset { std::vector<std::uint8_t> cv5, vr4; std::vector<std::uint16_t> vx4; };
+struct Tileset {
+    std::vector<std::uint8_t> cv5, vr4, wpe;
+    std::vector<std::uint16_t> vx4;
+    std::vector<float> features; // per minitile: 4x4 RGB box averages, made on first use
+    std::vector<float> means;    // per minitile: mean RGB
+};
 std::string root;
 std::atomic<bool> ready{false};
 std::array<std::uint32_t, 999> image_grp{};
@@ -122,23 +129,92 @@ void load() {
         const auto base = fs::path(root) / "tileset" / tilesets[i];
         t.cv5 = read_file(base.string() + ".cv5");
         t.vr4 = read_file(base.string() + ".vr4");
+        t.wpe = read_file(base.string() + ".wpe");
         const auto vx4 = read_file(base.string() + ".vx4");
         t.vx4.resize(vx4.size() / 2);
         for (std::size_t k = 0; k < t.vx4.size(); ++k) t.vx4[k] = std::uint16_t(vx4[k * 2] | vx4[k * 2 + 1] << 8);
-        sets += !t.cv5.empty() && !t.vr4.empty() && !t.vx4.empty();
+        sets += !t.cv5.empty() && !t.vr4.empty() && !t.vx4.empty() && t.wpe.size() >= 1024;
     }
     sc64::shell::log::info("hd: %u PC graphics, %u tilesets from %s", loaded, sets, root.c_str());
     ready = loaded > 0 && sets > 0;
 }
 
-// ---- The map's PC tiles: the chk the game loaded stays in RAM with its MTXM.
+// ---- The map's terrain. The game draws from its own tile array: N64 megatiles
+// (same 4x4 minitile layout and flips as the PC's, renumbered, half-size minitiles).
+// Each N64 minitile is drawn as its PC minitile: learned from the map's PC MTXM
+// (the loaded chk stays in RAM) where the two agree, otherwise the PC minitile
+// that looks the same at half size. Runtime changes (creep) follow the game.
 struct MapTiles {
-    std::uint32_t tiles = 0;      // guest address of the MTXM data (little-endian u16 per tile)
+    std::uint32_t game_tiles = 0;          // the game's tile array (BE u16 per tile, N64 megatile | flags)
+    std::uint32_t megas = 0, minis = 0;    // N64 megatiles (16 BE u16 refs) and minitiles (4x4 bytes)
     unsigned width = 0, height = 0, era = 0;
-    std::uint32_t game_tiles = 0; // the game's own tile array address when found
+    bool found = false;                    // the chk (era, MTXM) was found
+    std::vector<std::int32_t> mini_map;    // N64 minitile -> PC minitile, -1 unknown, -2 unmatched yet
 };
 MapTiles map;
+unsigned match_budget = 0; // content matches allowed this frame
+
+const std::vector<float>& features(Tileset& t) {
+    if (t.features.empty()) {
+        const std::size_t count = t.vr4.size() / 64;
+        t.features.resize(count * 48);
+        for (std::size_t m = 0; m < count; ++m)
+            for (unsigned by = 0; by < 4; ++by)
+                for (unsigned bx = 0; bx < 4; ++bx)
+                    for (unsigned c = 0; c < 3; ++c) {
+                        float sum = 0;
+                        for (unsigned dy = 0; dy < 2; ++dy)
+                            for (unsigned dx = 0; dx < 2; ++dx)
+                                sum += t.wpe[t.vr4[m * 64 + (by * 2 + dy) * 8 + bx * 2 + dx] * 4u + c];
+                        t.features[m * 48 + (by * 4 + bx) * 3 + c] = sum / 4;
+                    }
+        t.means.resize(count * 3);
+        for (std::size_t m = 0; m < count; ++m)
+            for (unsigned c = 0; c < 3; ++c) {
+                float sum = 0;
+                for (unsigned k = 0; k < 16; ++k) sum += t.features[m * 48 + k * 3 + c];
+                t.means[m * 3 + c] = sum / 16;
+            }
+    }
+    return t.features;
+}
+void n64_features(const std::uint8_t* rdram, const Tileset& t, unsigned mini, float* out) {
+    const std::uint32_t base = map.minis + mini * 16;
+    for (unsigned k = 0; k < 16; ++k)
+        for (unsigned c = 0; c < 3; ++c) out[k * 3 + c] = t.wpe[gb(rdram, base + k) * 4u + c];
+}
+float distance(const float* a, const float* b) {
+    float d = 0;
+    for (unsigned k = 0; k < 48; ++k) d += (a[k] - b[k]) * (a[k] - b[k]);
+    return d;
+}
+// The PC minitile closest to an N64 one (brute force; cached in mini_map).
+std::int32_t match_minitile(const std::uint8_t* rdram, unsigned mini) {
+    Tileset& t = tileset_data[map.era];
+    const auto& f = features(t);
+    float n64[48], mean[3] = {0, 0, 0};
+    n64_features(rdram, t, mini, n64);
+    for (unsigned k = 0; k < 16; ++k) for (unsigned c = 0; c < 3; ++c) mean[c] += n64[k * 3 + c] / 16;
+    std::int32_t best = 0;
+    float best_d = 1e30f;
+    for (std::size_t m = 0; m < f.size() / 48; ++m) {
+        // 16 x the squared mean difference never exceeds the distance: most candidates stop here.
+        const float* pm = t.means.data() + m * 3;
+        const float bound = 16 * ((mean[0] - pm[0]) * (mean[0] - pm[0]) + (mean[1] - pm[1]) * (mean[1] - pm[1])
+                                  + (mean[2] - pm[2]) * (mean[2] - pm[2]));
+        if (bound >= best_d) continue;
+        const float* pf = f.data() + m * 48;
+        float d = 0;
+        for (unsigned k = 0; k < 48 && d < best_d; ++k) d += (n64[k] - pf[k]) * (n64[k] - pf[k]);
+        if (d < best_d) { best_d = d; best = std::int32_t(m); }
+    }
+    return best;
+}
 bool locate_map(const std::uint8_t* rdram, unsigned width, unsigned height) {
+    map = {};
+    map.game_tiles = gw(rdram, tile_array); map.megas = gw(rdram, n64_megatiles); map.minis = gw(rdram, n64_minitiles);
+    map.width = width; map.height = height;
+    if ((map.game_tiles >> 24) != 0x80 || (map.megas >> 24) != 0x80 || (map.minis >> 24) != 0x80) return false;
     std::vector<std::uint8_t> ram(0x800000);
     for (std::size_t i = 0; i < ram.size(); i += 4) {
         std::uint32_t v; std::memcpy(&v, rdram + i, 4);
@@ -154,19 +230,89 @@ bool locate_map(const std::uint8_t* rdram, unsigned width, unsigned height) {
         const std::uint8_t era_tag[6] = {'E', 'R', 'A', ' ', 2, 0};
         auto e = std::find_end(ram.begin() + std::ptrdiff_t(from), it, era_tag, era_tag + 6);
         if (e == it) continue;
-        map.tiles = 0x80000000u + std::uint32_t(at + 8);
         map.era = (e[8] | e[9] << 8) & 7;
-        map.width = width; map.height = height;
-        sc64::shell::log::info("hd: map %ux%u, %s, tiles at 0x%08x", width, height, tilesets[map.era], map.tiles);
+        map.found = true;
+        // Learn N64 -> PC minitiles where the map's PC tile and the game's tile agree
+        // (same flips, same look at half size); creep laid at the start does not.
+        Tileset& tileset = tileset_data[map.era];
+        const auto& f = features(tileset);
+        const std::size_t groups = tileset.cv5.size() / 52, pc_megas = tileset.vx4.size() / 16, pc_minis = f.size() / 48;
+        std::size_t learned = 0;
+        for (std::size_t pos = 0; pos < std::size_t(width) * height; ++pos) {
+            const unsigned pc_tile = ram[at + 8 + pos * 2] | ram[at + 9 + pos * 2] << 8;
+            const unsigned n = gh(rdram, map.game_tiles + std::uint32_t(pos) * 2) & 0x7fff;
+            if ((pc_tile >> 4) >= groups) continue;
+            const unsigned pc_mega = tileset.cv5[(pc_tile >> 4) * 52 + 20 + (pc_tile & 15) * 2]
+                                     | tileset.cv5[(pc_tile >> 4) * 52 + 21 + (pc_tile & 15) * 2] << 8;
+            if (pc_mega >= pc_megas) continue;
+            for (unsigned k = 0; k < 16; ++k) {
+                const unsigned rn = gh(rdram, map.megas + n * 32 + k * 2), rp = tileset.vx4[pc_mega * 16 + k];
+                if ((rn & 1) != (rp & 1) || (rp >> 1) >= pc_minis) continue;
+                const unsigned mini = rn >> 1;
+                if (mini >= map.mini_map.size()) map.mini_map.resize(mini + 1, -2);
+                if (map.mini_map[mini] >= 0) continue;
+                float n64[48];
+                n64_features(rdram, tileset, mini, n64);
+                if (distance(n64, f.data() + std::size_t(rp >> 1) * 48) > 48 * 24 * 24) continue;
+                map.mini_map[mini] = std::int32_t(rp >> 1);
+                ++learned;
+            }
+        }
+        sc64::shell::log::info("hd: map %ux%u, %s, %zu minitiles from its PC tiles", width, height, tilesets[map.era], learned);
         return true;
     }
-    map = {};
-    return false;
+    // No chk in memory: the tileset whose palette the game shows, every minitile by its look.
+    unsigned best = 0, best_hits = 0;
+    for (unsigned era = 0; era < 8; ++era) {
+        const auto& wpe = tileset_data[era].wpe;
+        if (wpe.size() < 1024) continue;
+        unsigned hits = 0;
+        for (unsigned i = 0; i < 256; ++i) {
+            const unsigned c = gh(rdram, mission_palette + i * 2);
+            hits += (c >> 11) == (wpe[i * 4] >> 3u) && ((c >> 6) & 31) == (wpe[i * 4 + 1] >> 3u) && ((c >> 1) & 31) == (wpe[i * 4 + 2] >> 3u);
+        }
+        if (hits > best_hits) { best_hits = hits; best = era; }
+    }
+    if (best_hits < 200) {
+        sc64::shell::log::warning("hd: map %ux%u without its PC tiles or a known palette, N64 terrain kept", width, height);
+        return false;
+    }
+    map.era = best;
+    map.found = true;
+    sc64::shell::log::info("hd: map %ux%u, %s by its palette, minitiles matched by their look", width, height, tilesets[best]);
+    return true;
 }
-bool map_valid(const std::uint8_t* rdram) {
-    if (!map.tiles) return false;
-    const std::uint32_t tag = map.tiles - 8;
-    return gb(rdram, tag) == 'M' && gb(rdram, tag + 1) == 'T' && gb(rdram, tag + 2) == 'X' && gb(rdram, tag + 3) == 'M';
+
+// 32x32 PC pixels of an N64 megatile; incomplete (some minitiles not matched yet)
+// blocks are not kept and come back on a later frame.
+struct MegaCache { std::vector<std::int32_t> slot; std::vector<std::uint8_t> pixels; std::uint32_t megas = 0; };
+MegaCache mega_cache;
+const std::uint8_t* megatile(const std::uint8_t* rdram, unsigned n, bool& complete) {
+    static std::array<std::uint8_t, 1024> scratch_block;
+    complete = true;
+    if (mega_cache.megas != map.megas) { mega_cache = {}; mega_cache.megas = map.megas; }
+    if (n < mega_cache.slot.size() && mega_cache.slot[n] >= 0)
+        return mega_cache.pixels.data() + std::size_t(mega_cache.slot[n]) * 1024;
+    const Tileset& t = tileset_data[map.era];
+    const std::size_t pc_minis = t.vr4.size() / 64;
+    std::uint8_t* out = scratch_block.data();
+    for (unsigned k = 0; k < 16; ++k) {
+        const unsigned ref = gh(rdram, map.megas + n * 32 + k * 2), mini = ref >> 1;
+        if (mini >= map.mini_map.size()) map.mini_map.resize(mini + 1, -2);
+        std::int32_t& pc = map.mini_map[mini];
+        if (pc < 0 && match_budget) { pc = match_minitile(rdram, mini); --match_budget; }
+        const unsigned bx = (k % 4) * 8, by = (k / 4) * 8;
+        for (unsigned y = 0; y < 8; ++y)
+            for (unsigned x = 0; x < 8; ++x)
+                out[(by + y) * 32 + bx + x] = pc >= 0 && std::size_t(pc) < pc_minis
+                    ? t.vr4[std::size_t(pc) * 64 + y * 8 + ((ref & 1) ? 7 - x : x)] : 0;
+        complete &= pc >= 0;
+    }
+    if (!complete) return out;
+    if (n >= mega_cache.slot.size()) mega_cache.slot.resize(n + 1, -1);
+    mega_cache.slot[n] = std::int32_t(mega_cache.pixels.size() / 1024);
+    mega_cache.pixels.insert(mega_cache.pixels.end(), out, out + 1024);
+    return mega_cache.pixels.data() + std::size_t(mega_cache.slot[n]) * 1024;
 }
 
 // ---- HD canvases in guest memory (the render functions draw there)
@@ -194,32 +340,6 @@ std::uint32_t guest_alloc(std::uint8_t* rdram, std::size_t size) {
     return p ? 0x80000000u + std::uint32_t(static_cast<std::uint8_t*>(p) - rdram) : 0;
 }
 
-// Decoded 32x32 megatiles of the map's tileset, made on first use.
-struct MegaCache { unsigned era = ~0u; std::vector<std::int32_t> slot; std::vector<std::uint8_t> pixels; };
-MegaCache mega_cache;
-const std::uint8_t* megatile(unsigned mega) {
-    const Tileset& t = tileset_data[map.era];
-    if (mega_cache.era != map.era) {
-        mega_cache.era = map.era;
-        mega_cache.slot.assign(t.vx4.size() / 16, -1);
-        mega_cache.pixels.clear();
-    }
-    if (mega >= mega_cache.slot.size()) return nullptr;
-    if (mega_cache.slot[mega] < 0) {
-        mega_cache.slot[mega] = std::int32_t(mega_cache.pixels.size() / 1024);
-        mega_cache.pixels.resize(mega_cache.pixels.size() + 1024);
-        std::uint8_t* out = mega_cache.pixels.data() + std::size_t(mega_cache.slot[mega]) * 1024;
-        const std::size_t minitiles = t.vr4.size() / 64;
-        for (unsigned y = 0; y < 32; ++y)
-            for (unsigned x = 0; x < 32; ++x) {
-                const unsigned v = t.vx4[mega * 16 + (y / 8) * 4 + x / 8];
-                const std::size_t mini = v >> 1;
-                out[y * 32 + x] = mini < minitiles ? t.vr4[mini * 64 + (y % 8) * 8 + ((v & 1) ? 7 - x % 8 : x % 8)] : 0;
-            }
-    }
-    return mega_cache.pixels.data() + std::size_t(mega_cache.slot[mega]) * 1024;
-}
-
 // Calls a guest render function on an HD canvas: (x, y) in HD pixels, frame a guest
 // frame header, the clip rectangle at rect, colouring data as the fifth argument.
 void call_render(std::uint8_t* rdram, const recomp_context* ctx, const Canvas& c, std::uint32_t render, int x, int y,
@@ -238,25 +358,34 @@ void call_render(std::uint8_t* rdram, const recomp_context* ctx, const Canvas& c
     sw(rdram, render_canvas, saved);
 }
 
-// Index 0 (black) marks the dark beyond the map; presentation keeps the N64 pixels there.
-// Rows are assembled in guest byte order (each 4-byte group reversed, as RDRAM holds
-// them), so aligned megatile spans are plain copies.
-// The last terrain drawn, reused while the camera stands still (most frames).
-struct TerrainCache { int cam_x = 0, cam_y = 0, vx = 0, vy = 0; unsigned w = 0, h = 0, era = 0; std::uint32_t tiles = 0;
-                      std::vector<std::uint8_t> bytes; };
+// Index 0 marks pixels without a PC equivalent (beyond the map, minitiles not
+// matched yet); presentation keeps the N64 pixels there. Rows are assembled in guest
+// byte order (each 4-byte group reversed, as RDRAM holds them).
+// The last terrain drawn, reused while the camera and the visible tiles stand still.
+struct TerrainCache { int cam_x = 0, cam_y = 0, vx = 0, vy = 0; unsigned w = 0, h = 0; std::uint64_t tiles = 0;
+                      std::uint32_t game_tiles = 0; std::vector<std::uint8_t> bytes; };
 TerrainCache terrain_cache;
 void draw_terrain(std::uint8_t* rdram, const Canvas& c, int cam_x, int cam_y, int vx, int vy) {
-    const Tileset& t = tileset_data[map.era];
     const unsigned w = c.width * 2, h = c.height * 2;
+    // The visible tiles' identity, so creep spreading redraws the terrain.
+    const int tx0 = std::max(0, (cam_x - 2 * vx) / 32), ty0 = std::max(0, (cam_y - 2 * vy) / 32);
+    const int tx1 = std::min(int(map.width), (cam_x - 2 * vx + int(w)) / 32 + 1);
+    const int ty1 = std::min(int(map.height), (cam_y - 2 * vy + int(h)) / 32 + 1);
+    std::uint64_t hash = 14695981039346656037ull;
+    for (int ty = ty0; ty < ty1; ++ty)
+        for (int tx = tx0; tx < tx1; ++tx)
+            hash = mix(hash, gh(rdram, map.game_tiles + std::uint32_t(ty * int(map.width) + tx) * 2));
     TerrainCache& cache = terrain_cache;
     if (cache.cam_x == cam_x && cache.cam_y == cam_y && cache.vx == vx && cache.vy == vy && cache.w == w && cache.h == h
-        && cache.era == map.era && cache.tiles == map.tiles && cache.bytes.size() == std::size_t(w) * h) {
+        && cache.tiles == hash && cache.game_tiles == map.game_tiles && cache.bytes.size() == std::size_t(w) * h) {
         std::memcpy(rdram + offset(c.pixels), cache.bytes.data(), cache.bytes.size());
         return;
     }
-    cache = {cam_x, cam_y, vx, vy, w, h, map.era, map.tiles, std::move(cache.bytes)};
+    cache = {cam_x, cam_y, vx, vy, w, h, hash, map.game_tiles, std::move(cache.bytes)};
     cache.bytes.resize(std::size_t(w) * h);
-    const std::size_t groups = t.cv5.size() / 52;
+    match_budget = 4; // content matches per redraw (a few hundred microseconds each)
+    bool complete = true;
+    const std::uint32_t megas = (map.minis - map.megas) / 32;
     std::vector<std::uint8_t> row(w + 4);
     for (unsigned y = 0; y < h; ++y) {
         const int my = cam_y + int(y) - 2 * vy;
@@ -266,13 +395,11 @@ void draw_terrain(std::uint8_t* rdram, const Canvas& c, int cam_x, int cam_y, in
             const int left = std::max(0, 2 * vx - cam_x), right = std::min(int(w), int(map.width) * 32 + 2 * vx - cam_x);
             for (int x = left; x < right;) {
                 const unsigned mx = unsigned(cam_x + x - 2 * vx), tx = mx / 32, px = mx % 32;
-                const std::uint32_t a = map.tiles + (ty * map.width + tx) * 2;
-                const unsigned tile = gb(rdram, a) | gb(rdram, a + 1) << 8;
-                const std::size_t group = tile >> 4;
+                const unsigned n = gh(rdram, map.game_tiles + (ty * map.width + tx) * 2) & 0x7fff;
                 const unsigned run = std::min(32 - px, unsigned(right - x));
-                const std::uint8_t* block = group < groups
-                    ? megatile(t.cv5[group * 52 + 20 + (tile & 15) * 2] | t.cv5[group * 52 + 21 + (tile & 15) * 2] << 8)
-                    : nullptr;
+                bool whole = true;
+                const std::uint8_t* block = n < megas ? megatile(rdram, n, whole) : nullptr;
+                complete &= whole;
                 if (block) {
                     const std::uint8_t* src = block + py * 32 + px;
                     if ((x & 3) == 0 && (px & 3) == 0 && (run & 3) == 0) {
@@ -288,6 +415,7 @@ void draw_terrain(std::uint8_t* rdram, const Canvas& c, int cam_x, int cam_y, in
         }
         std::memcpy(cache.bytes.data() + std::size_t(y) * w, row.data(), w);
     }
+    if (!complete) cache.tiles = ~hash; // not kept: unmatched minitiles get matched over the next frames
     std::memcpy(rdram + offset(c.pixels), cache.bytes.data(), cache.bytes.size());
 }
 }
@@ -509,12 +637,11 @@ extern "C" void sc64_hd_terrain(std::uint8_t* rdram, recomp_context*) {
     const std::uint32_t canvas = gw(rdram, canvas_descriptor + 4) & 0x1fffffff;
     if (width < 320 || width > 512 || height != 240 || canvas == 0 || canvas + width * height > 0x800000) return;
     const unsigned map_w = gh(rdram, map_size), map_h = gh(rdram, map_size + 2);
-    const std::uint32_t game_tiles = gw(rdram, tile_array);
     if (!map_w || !map_h || map_w > 256 || map_h > 256) return;
-    if (game_tiles != map.game_tiles || map_w != map.width || map_h != map.height || !map_valid(rdram)) {
-        if (!locate_map(rdram, map_w, map_h)) { map.game_tiles = game_tiles; return; }
-        map.game_tiles = game_tiles;
-    }
+    if (gw(rdram, tile_array) != map.game_tiles || gw(rdram, n64_megatiles) != map.megas || map_w != map.width
+        || map_h != map.height)
+        locate_map(rdram, map_w, map_h);
+    if (!map.found) return;
     if (!scratch) {
         scratch = guest_alloc(rdram, scratch_size + 16);
         rect = scratch + scratch_size;
