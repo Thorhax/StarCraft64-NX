@@ -508,6 +508,23 @@ std::optional<std::vector<std::uint8_t>> compose(const gfx::DrawList& list, cons
     const auto bounds = gfx::raster_bounds(*bg);
     const int s0 = bg->s >> 5, t0 = bg->t >> 5, x0 = bg->x0 / 4, y0 = bg->y0 / 4;
     const unsigned fw = frame->canvas_width * 2;
+    // RDP rectangles after the background that are smaller than half of it (minimap,
+    // HUD, cursor; not the fog layer over the whole view): there only pixels left
+    // exactly as the canvas are HD, the rest stays as drawn even when it is dark.
+    std::vector<std::uint8_t> overlay(std::size_t(w) * h, 0);
+    {
+        const auto area = [](const gfx::PixelBounds& b) { return std::int64_t(b.x1 - b.x0) * (b.y1 - b.y0); };
+        bool after = false;
+        for (const auto& r : list.rectangles) {
+            if (&r == bg) { after = true; continue; }
+            if (!after || r.target != target) continue;
+            const auto rb = gfx::raster_bounds(r);
+            if (rb.empty() || area(rb) * 2 >= area(bounds)) continue;
+            for (int y = std::max(0, rb.y0); y < std::min(int(h), rb.y1); ++y)
+                std::fill_n(overlay.begin() + std::ptrdiff_t(y) * w + std::max(0, rb.x0),
+                            std::max(0, std::min(int(w), rb.x1) - std::max(0, rb.x0)), std::uint8_t(1));
+        }
+    }
     // Pass 1: each canvas pixel's fog alpha (0..256), or -1 where the RDP drew over
     // the canvas (HUD, cursor) or outside the background.
     std::vector<std::int16_t> alpha(std::size_t(w) * h, -1);
@@ -524,6 +541,7 @@ std::optional<std::vector<std::uint8_t>> compose(const gfx::DrawList& list, cons
             const std::uint32_t pixel = in[std::size_t(y) * w + x] | 0xff000000u, b = palette[row[u]];
             std::int16_t& a = alpha[std::size_t(y) * w + x];
             if (pixel == b) { a = 0; continue; }
+            if (overlay[std::size_t(y) * w + x]) continue;
             if (pixel == fog_pixel) { a = 256; continue; }
             // The RDP blends the canvas toward the fog colour (fog of war, the map's
             // edges): solve for that blend; anything else was drawn over the canvas.
