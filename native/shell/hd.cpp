@@ -511,7 +511,8 @@ std::optional<std::vector<std::uint8_t>> compose(const gfx::DrawList& list, cons
     // RDP rectangles after the background that are smaller than half of it (minimap,
     // HUD, cursor; not the fog layer over the whole view): there only pixels left
     // exactly as the canvas are HD, the rest stays as drawn even when it is dark.
-    std::vector<std::uint8_t> overlay(std::size_t(w) * h, 0);
+    thread_local std::vector<std::uint8_t> overlay;
+    overlay.assign(std::size_t(w) * h, 0);
     {
         const auto area = [](const gfx::PixelBounds& b) { return std::int64_t(b.x1 - b.x0) * (b.y1 - b.y0); };
         bool after = false;
@@ -527,7 +528,8 @@ std::optional<std::vector<std::uint8_t>> compose(const gfx::DrawList& list, cons
     }
     // Pass 1: each canvas pixel's fog alpha (0..256), or -1 where the RDP drew over
     // the canvas (HUD, cursor) or outside the background.
-    std::vector<std::int16_t> alpha(std::size_t(w) * h, -1);
+    thread_local std::vector<std::int16_t> alpha;
+    alpha.assign(std::size_t(w) * h, -1);
     const int pc[3] = {fog_r, fog_g, fog_b};
     for (unsigned y = 0; y < h; ++y) {
         const int v = t0 + int(y) - y0;
@@ -559,7 +561,8 @@ std::optional<std::vector<std::uint8_t>> compose(const gfx::DrawList& list, cons
     // Pass 2: the RDP dithers the fog; a 3x3 average over the blended pixels
     // smooths its edges at twice the resolution. Padded by one pixel, separable.
     const unsigned pw = w + 2, ph = h + 2;
-    std::vector<std::int32_t> sums(std::size_t(pw) * ph, 0), counts(std::size_t(pw) * ph, 0);
+    thread_local std::vector<std::int32_t> sums, counts;
+    sums.assign(std::size_t(pw) * ph, 0); counts.assign(std::size_t(pw) * ph, 0);
     for (unsigned y = 0; y < h; ++y)
         for (unsigned x = 0; x < w; ++x) {
             const int a = alpha[std::size_t(y) * w + x];
@@ -568,7 +571,8 @@ std::optional<std::vector<std::uint8_t>> compose(const gfx::DrawList& list, cons
             sums[i - 1] += a; sums[i] += a; sums[i + 1] += a;
             counts[i - 1] += 1; counts[i] += 1; counts[i + 1] += 1;
         }
-    std::vector<std::int16_t> smooth(std::size_t(pw) * ph, -1);
+    thread_local std::vector<std::int16_t> smooth;
+    smooth.assign(std::size_t(pw) * ph, -1);
     for (unsigned y = 0; y < h; ++y)
         for (unsigned x = 0; x < w; ++x) {
             if (alpha[std::size_t(y) * w + x] < 0) continue;
@@ -597,6 +601,11 @@ std::optional<std::vector<std::uint8_t>> compose(const gfx::DrawList& list, cons
             if (a == 0 && l == 0 && r == 0 && up == 0 && dn == 0 && near(-1, -1) == 0 && near(1, -1) == 0
                 && near(-1, 1) == 0 && near(1, 1) == 0) { // clear of fog: the HD pixels as they are
                 for (int i = 0; i < 4; ++i) *o[i] = q[i] ? palette[q[i]] : pixel;
+                continue;
+            }
+            if (a == 256 && l == 256 && r == 256 && up == 256 && dn == 256 && near(-1, -1) == 256
+                && near(1, -1) == 256 && near(-1, 1) == 256 && near(1, 1) == 256) { // deep in the fog
+                for (int i = 0; i < 4; ++i) *o[i] = q[i] ? fog_pixel : pixel;
                 continue;
             }
             for (int i = 0; i < 4; ++i) {
