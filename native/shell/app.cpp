@@ -32,9 +32,10 @@ using namespace sc64::shell;
 
 // Keyboard bindings (former game.input_binding).
 struct KeyBinding { SDL_Scancode scancode; const char* action; };
-constexpr std::array<KeyBinding, 32> key_bindings = {{
+constexpr std::array<KeyBinding, 33> key_bindings = {{
     {SDL_SCANCODE_X, "a"}, {SDL_SCANCODE_C, "b"}, {SDL_SCANCODE_ESCAPE, "escape_back"},
     {SDL_SCANCODE_AC_BACK, "android_back"}, {SDL_SCANCODE_RETURN, "start"}, {SDL_SCANCODE_KP_ENTER, "start"},
+    {SDL_SCANCODE_F10, "start"}, // the PC game menu key
     {SDL_SCANCODE_Z, "z"}, {SDL_SCANCODE_Q, "l"}, {SDL_SCANCODE_E, "r"},
     {SDL_SCANCODE_I, "cup"}, {SDL_SCANCODE_K, "cdown"}, {SDL_SCANCODE_J, "cleft"}, {SDL_SCANCODE_L, "cright"},
     {SDL_SCANCODE_LEFT, "dleft"}, {SDL_SCANCODE_RIGHT, "dright"}, {SDL_SCANCODE_UP, "dup"},
@@ -100,6 +101,10 @@ struct App {
         event.x = w > 0 ? px * design_width / w : 0;
         event.y = h > 0 ? (h - py) * design_height / h : 0;
         return event;
+    }
+    // A real mouse in a fullscreen window edge-scrolls the map as on PC.
+    bool confined(SDL_MouseID which) const {
+        return which != SDL_TOUCH_MOUSEID && (SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN);
     }
     void dispatch(const InputEvent& event) {
         if (!gui->on_input(event.id, event) && event.id) host->on_input(*event.id, event);
@@ -284,14 +289,18 @@ SDL_AppResult SDL_AppEvent(void* state, SDL_Event* event) {
                 : event->button.button == SDL_BUTTON_MIDDLE ? "pointer_pan" : nullptr;
             if (!id) break;
             auto input = app.pointer_event(id, event->button.x, event->button.y);
+            input.confined_mouse = app.confined(event->button.which);
             input.pressed = event->type == SDL_EVENT_MOUSE_BUTTON_DOWN;
             input.released = !input.pressed;
             app.dispatch(input);
             break;
         }
-        case SDL_EVENT_MOUSE_MOTION:
-            app.dispatch(app.pointer_event(std::nullopt, event->motion.x, event->motion.y));
+        case SDL_EVENT_MOUSE_MOTION: {
+            auto input = app.pointer_event(std::nullopt, event->motion.x, event->motion.y);
+            input.confined_mouse = app.confined(event->motion.which);
+            app.dispatch(input);
             break;
+        }
         case SDL_EVENT_FINGER_DOWN:
         case SDL_EVENT_FINGER_MOTION:
         case SDL_EVENT_FINGER_UP:

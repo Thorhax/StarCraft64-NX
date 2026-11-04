@@ -87,6 +87,9 @@ Measured on a Switch launched as a Sphaira 4-core forwarder:
 - Native audio (libnx `audout`), FlashRAM saves on the SD card
 - Joy-Con / Pro Controller and handheld touch screen (tap to point, drag to
   select, two-finger pan, instant touch cursor)
+- USB keyboard and mouse, PC style: the mouse drives the cursor (left click
+  select, right click order), edge and arrow-key scrolling, F10 menu
+  (docs/input.md)
 
 | Core | Work |
 |---|---|
@@ -369,7 +372,7 @@ and Build-Tools 36. See [docs/android.md](docs/android.md) and
 
 ## What changed for Switch
 
-- `native/switch/` — libnx shell (framebuffer video, HID pads + touch, crash
+- `native/switch/` — libnx shell (framebuffer video, HID pads, touch, keyboard and mouse, crash
   handler, 2 MiB thread stacks), SD platform layer, CMake profile, and the GPU
   renderer: `gl_raster.*` (DrawList rasterizer: per-axis texture addressing
   tables on the CPU, integer fragment shader, linear SSBO framebuffer,

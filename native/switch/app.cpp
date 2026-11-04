@@ -18,6 +18,7 @@
 #include "movie.hpp"
 #endif
 #include "scripts.hpp"
+#include "pointer.hpp"
 #include <switch.h>
 #if defined(SC64_SWITCH_GL)
 #include "gl_device.hpp"
@@ -138,6 +139,13 @@ bool option_file(const char* name) {
 struct LoopProfile { u64 tick = 0, scale = 0, wait = 0, since = 0; unsigned loops = 0; };
 LoopProfile loop_profile;
 
+// The software mouse pointer, drawn 2x: '#' outline, '.' fill.
+constexpr unsigned pointer_scale = 2;
+constexpr std::array<const char*, 17> pointer_shape = {{
+    "#", "##", "#.#", "#..#", "#...#", "#....#", "#.....#", "#......#", "#.......#",
+    "#........#", "#.....#####", "#..#..#", "#.# #..#", "##  #..#", "#    #..#", "     #..#", "      ##",
+}};
+
 // Original raster fitted with nearest sampling (320x240 and 640x480 -> 960x720),
 // centred: the same geometry as the shell's Fit viewport, so touch mapping matches.
 // The framebuffer stays block linear: lines are scaled 8 at a time into a strip
@@ -217,11 +225,32 @@ public:
                 const auto* in = src + std::size_t(sy) * w;
                 for (unsigned x = 0; x < dw; ++x) out[x] = in[xmap_[x]] | 0xff000000u; // RGBA32, opaque
             }
+            pointer(y0);
             swizzle(base, stride, y0);
         }
         framebufferEnd(&fb_);
     }
 private:
+    // The mouse pointer over the strip's 8 lines, unless the game cursor stands in for it.
+    void pointer(unsigned y0) {
+        const auto& p = switch_pointer();
+        if (!p.shown || p.game_cursor) return;
+        const int px = int(p.x), py = int(p.y);
+        for (unsigned k = 0; k < 8; ++k) {
+            const int row = (int(y0 + k) - py) / int(pointer_scale);
+            if (int(y0 + k) < py || row >= int(pointer_shape.size())) continue;
+            std::uint32_t* line = strip_ + std::size_t(k) * screen_w;
+            const char* shape = pointer_shape[row];
+            for (int i = 0; shape[i]; ++i) {
+                if (shape[i] == ' ') continue;
+                const std::uint32_t colour = shape[i] == '#' ? 0xff000000u : 0xffffffffu;
+                for (unsigned d = 0; d < pointer_scale; ++d) {
+                    const int x = px + i * int(pointer_scale) + int(d);
+                    if (x >= 0 && x < int(screen_w)) line[x] = colour;
+                }
+            }
+        }
+    }
     static std::uint32_t mean(std::uint32_t a, std::uint32_t b) { return ((a & 0xfefefefeu) >> 1) + ((b & 0xfefefefeu) >> 1); }
     // Source line sy widened 2 -> 3 (outer pixels copied, the middle one their mean), cached per slot.
     const std::uint32_t* widened(const std::uint32_t* src, unsigned w, unsigned sy, unsigned slot) {
@@ -268,6 +297,23 @@ constexpr std::array<ButtonBinding, 12> button_bindings = {{
     {HidNpadButton_Down, "ddown"}, {HidNpadButton_Minus, "pointer_commands"},
 }};
 constexpr double analog_press = 0.5;
+// A USB keyboard: the desktop shell's keys (native/shell/app.cpp), sent without a
+// gamepad id so the arrows scroll the map as on PC; F10 opens the game menu.
+struct KeyBinding { HidKeyboardKey key; const char* action; };
+constexpr std::array<KeyBinding, 30> key_bindings = {{
+    {HidKeyboardKey_X, "a"}, {HidKeyboardKey_C, "b"}, {HidKeyboardKey_Escape, "escape_back"},
+    {HidKeyboardKey_Return, "start"}, {HidKeyboardKey_NumPadEnter, "start"}, {HidKeyboardKey_F10, "start"},
+    {HidKeyboardKey_Z, "z"}, {HidKeyboardKey_Q, "l"}, {HidKeyboardKey_E, "r"},
+    {HidKeyboardKey_I, "cup"}, {HidKeyboardKey_K, "cdown"}, {HidKeyboardKey_J, "cleft"}, {HidKeyboardKey_L, "cright"},
+    {HidKeyboardKey_LeftArrow, "dleft"}, {HidKeyboardKey_RightArrow, "dright"}, {HidKeyboardKey_UpArrow, "dup"},
+    {HidKeyboardKey_DownArrow, "ddown"}, {HidKeyboardKey_A, "left"}, {HidKeyboardKey_D, "right"}, {HidKeyboardKey_W, "up"},
+    {HidKeyboardKey_S, "down"}, {HidKeyboardKey_P, "pause"},
+    {HidKeyboardKey_F3, "touch_toggle"}, {HidKeyboardKey_F4, "touch_edit"}, {HidKeyboardKey_F6, "touch_player"},
+    {HidKeyboardKey_Plus, "touch_larger"}, {HidKeyboardKey_NumPadAdd, "touch_larger"},
+    {HidKeyboardKey_Minus, "touch_smaller"}, {HidKeyboardKey_OpenBracket, "touch_opacity_down"},
+    {HidKeyboardKey_CloseBracket, "touch_opacity_up"},
+}};
+constexpr KeyBinding tab_binding{HidKeyboardKey_Tab, "pointer_commands"};
 
 #if defined(SC64_MOVIES)
 // PC cinematics (movies/*.smk, tools/voices/extract_movies.py from the user's own
@@ -339,6 +385,8 @@ struct App {
     u64 previous_buttons = 0;
     std::map<std::string, double> analog;
     std::map<s32, std::pair<double, double>> fingers; // id -> last screen position
+    HidKeyboardState keyboard{};
+    HidMouseState mouse{};
 #if defined(SC64_MOVIES)
     Cinema cinema;
     bool movies = false;
@@ -466,6 +514,52 @@ struct App {
         touch.x = px * design_width / screen_w; touch.y = (screen_h - py) * design_height / screen_h;
         return touch;
     }
+    // Keyboard actions carry no gamepad id, like the desktop shell's.
+    void key_action(const char* id, bool pressed) {
+        InputEvent event;
+        event.id = id; event.pressed = pressed; event.released = !pressed;
+        dispatch(event);
+    }
+    InputEvent mouse_event(const char* id, const HidMouseState& m) const {
+        InputEvent event;
+        if (id) event.id = id;
+        event.screen_x = m.x; event.screen_y = double(screen_h) - m.y;
+        event.x = double(m.x) * design_width / screen_w; event.y = (double(screen_h) - m.y) * design_height / screen_h;
+        event.confined_mouse = true;
+        return event;
+    }
+    // Key presses and mouse buttons since the last poll (no gamepad, PC-style).
+    void poll_keyboard_mouse() {
+        HidKeyboardState k{};
+        if (hidGetKeyboardStates(&k, 1)) {
+            auto edge = [&](const KeyBinding& b) {
+                const bool now = hidKeyboardStateGetKey(&k, b.key), before = hidKeyboardStateGetKey(&keyboard, b.key);
+                if (now != before) key_action(b.action, now);
+            };
+            for (const auto& binding : key_bindings) edge(binding);
+            edge(tab_binding);
+            keyboard = k;
+        }
+        HidMouseState m{};
+        if (!hidGetMouseStates(&m, 1) || !(m.attributes & HidMouseAttribute_IsConnected)) {
+            switch_pointer().shown = false; mouse = {};
+            return;
+        }
+        auto& p = switch_pointer();
+        const bool moved = m.x != mouse.x || m.y != mouse.y;
+        if (moved || m.buttons != mouse.buttons) p.shown = true;
+        p.x = m.x; p.y = m.y;
+        if (moved) dispatch(mouse_event(nullptr, m));
+        constexpr std::array<std::pair<u32, const char*>, 3> buttons = {{
+            {HidMouseButton_Left, "touch_mouse"}, {HidMouseButton_Right, "pointer_order"}, {HidMouseButton_Middle, "pointer_pan"}}};
+        for (const auto& [bit, id] : buttons)
+            if ((m.buttons ^ mouse.buttons) & bit) {
+                auto event = mouse_event(id, m);
+                event.pressed = (m.buttons & bit) != 0; event.released = !event.pressed;
+                dispatch(event);
+            }
+        mouse = m;
+    }
     void poll_input() {
         padUpdate(&pad);
         const u64 buttons = padGetButtons(&pad);
@@ -475,6 +569,17 @@ struct App {
             constexpr u64 skip = HidNpadButton_A | HidNpadButton_B | HidNpadButton_Plus;
             if (changed & buttons & skip) cinema.skip = true;
             previous_buttons = buttons;
+            HidKeyboardState k{};
+            if (hidGetKeyboardStates(&k, 1)) {
+                for (auto key : {HidKeyboardKey_Escape, HidKeyboardKey_Return, HidKeyboardKey_Space})
+                    if (hidKeyboardStateGetKey(&k, key) && !hidKeyboardStateGetKey(&keyboard, key)) cinema.skip = true;
+                keyboard = k;
+            }
+            HidMouseState m{};
+            if (hidGetMouseStates(&m, 1)) {
+                if (m.buttons & ~mouse.buttons & (HidMouseButton_Left | HidMouseButton_Right)) cinema.skip = true;
+                mouse = m;
+            }
             HidTouchScreenState state{};
             std::map<s32, std::pair<double, double>> now;
             if (hidGetTouchScreenStates(&state, 1))
@@ -493,7 +598,9 @@ struct App {
 #endif
         for (const auto& binding : button_bindings)
             if (changed & ~quiet & binding.button) action(binding.action, (buttons & binding.button) != 0);
+        if (changed & buttons) switch_pointer().shown = false; // the controller took over
         previous_buttons = buttons;
+        poll_keyboard_mouse();
         auto axis = [&](const HidAnalogStickState& s, const char* left, const char* right,
                         const char* up, const char* down) {
             const double x = std::max(-1.0, s.x / 32767.0), y = std::max(-1.0, s.y / 32767.0);
@@ -522,7 +629,10 @@ struct App {
                 event.touch.push_back(touch);
             }
         fingers = std::move(now);
-        if (!event.touch.empty()) dispatch(event);
+        if (!event.touch.empty()) {
+            switch_pointer().shown = false; // touch took over
+            dispatch(event);
+        }
     }
 };
 }
@@ -537,6 +647,8 @@ int main(int argc, char* argv[]) {
     std::freopen("sdmc:/switch/StarCraft64/sc64-err.log", "w", stderr);
     padConfigureInput(1, HidNpadStyleSet_NpadStandard);
     hidInitializeTouchScreen();
+    hidInitializeKeyboard();
+    hidInitializeMouse();
     auto app = std::make_unique<App>();
     padInitializeDefault(&app->pad);
     int result = 0;

@@ -93,6 +93,9 @@ for the handoff, local-build risks and device acceptance checklist.
 | Esc / Android system Back (button or gesture) | B (Back/Cancel) at the current original cursor; no pointer movement |
 | Panel Continue | Explicit original A; fallback for unresearched custom dialogs |
 | Panel menu arrows | Original D-pad navigation |
+| Mouse at the edge of the mission image (Switch USB mouse; desktop fullscreen) | PC edge scrolling: Z+stick toward that edge until the map bound (ADR-089) |
+| Arrow keys in a mission | PC scrolling, as edge scrolling; a controller D-pad keeps its original meaning |
+| F10 | Start (the PC game-menu key) |
 | F3 | Enable/disable diagnostic pad |
 | F4 while pad visible | Edit layout; press again to save |
 | F6 while using pad | Select player 1/2 for diagnostic pad |
@@ -107,6 +110,11 @@ stop scrolling once it is reached. Lifting either finger cancels steering. Camer
 Keyboard bindings are listed in `native/shell/app.cpp`; Enter is Start,
 X is A, C is B, Esc and Android Back are B aliases, WASD is stick, P is host pause. Mouse gameplay targets the scoped
 1P profile. Split-screen and physical touch are not certified.
+
+On Switch a USB keyboard and mouse use the same bindings (`native/switch/app.cpp`).
+The mouse draws its own arrow pointer, except over the map where the game's
+cursor follows it; the pointer hides on the next touch or controller press and
+returns when the mouse moves. Controller and touch controls are unchanged.
 
 Researched modal screens consume pointer input before the gameplay cursor servo.
 Unknown widgets retain Tab/long press → Continue, Back and menu arrows. Touch

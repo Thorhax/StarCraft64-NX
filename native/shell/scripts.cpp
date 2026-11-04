@@ -790,6 +790,15 @@ bool GuiScript::contact(const std::optional<std::string>& id, const std::string&
     else { px = *a.x * sw / w - .5; py = *a.y * sh / h - .5; }
     const Phase phase = a.released ? Phase::up : a.pressed ? Phase::down : Phase::move;
     const bool pan_event = id == "pointer_pan" || (!id && g.pan);
+    if (a.confined_mouse) { // PC edge scrolling: the pointer at (or beyond) the image edge in a mission
+        g.scroll.edge_x = g.scroll.edge_y = 0;
+        if (mode_is(info, "game") && !g.pan && !g.drag && !g.contacts.contains(key))
+            if (const auto raw = viewport::to_native_raw(rect, px, py)) {
+                const double nw = info.width.value_or(0), nh = info.height.value_or(0);
+                g.scroll.edge_x = raw->x < 3 ? -1 : raw->x > nw - 4 ? 1 : 0;
+                g.scroll.edge_y = raw->y < 3 ? -1 : raw->y > nh - 4 ? 1 : 0;
+            }
+    }
     // Corner buttons also accept contacts in the letterbox beside them.
     if (!pan_event && id != "pointer_order") {
         if (const auto raw = viewport::to_native_raw(rect, px, py))
@@ -846,6 +855,14 @@ bool GuiScript::on_input(const std::optional<std::string>& id, const InputEvent&
         }
     }
     const auto info = native_.info();
+    // Keyboard arrows (not the controller's D-pad) scroll the map in a mission, as on PC;
+    // elsewhere they stay the D-pad.
+    if (id && !action.gamepad && (*id == "dleft" || *id == "dright" || *id == "dup" || *id == "ddown")) {
+        int& axis = (*id == "dleft" || *id == "dright") ? g.scroll.key_x : g.scroll.key_y;
+        const int direction = (*id == "dleft" || *id == "dup") ? -1 : 1;
+        if (action.pressed && mode_is(info, "game")) { axis = direction; return true; }
+        if (action.released && axis == direction) { axis = 0; return true; }
+    }
     const bool input_blocked = info.paused || !info.running || info.input_active == false;
     touch_pad::block(s, input_blocked);
     if (!touch_pad::visible(s)) {
@@ -867,7 +884,7 @@ bool GuiScript::on_input(const std::optional<std::string>& id, const InputEvent&
             }
             return consumed;
         }
-        if (!s.multi && (!id || *id == "touch_mouse" || *id == "pointer_order" || *id == "pointer_pan"))
+        if ((!s.multi || action.confined_mouse) && (!id || *id == "touch_mouse" || *id == "pointer_order" || *id == "pointer_pan"))
             return contact(id, "mouse", action, false, info);
         return false;
     }

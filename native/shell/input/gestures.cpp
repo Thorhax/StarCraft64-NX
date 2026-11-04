@@ -31,6 +31,7 @@ std::pair<double, double> stick_from_raw(double x, double y) {
     return {x * scale, y * scale};
 }
 
+PadOutput drive_camera(GestureState& s, double dx, double dy, const Info& info);
 PadOutput camera(GestureState& s, CameraGesture& gesture, double x, double y, const Info& info) {
     const double field = info.fields;
     if (!info.camera_valid || !finite(info.camera_divisor) || *info.camera_divisor < 1) {
@@ -51,7 +52,11 @@ PadOutput camera(GestureState& s, CameraGesture& gesture, double x, double y, co
         if (field < drive->settle_field || info.cursor_field.value_or(0) <= drive->until_field) return {};
         s.camera_drive.reset();
     }
-    const double dx = tx - info.camera_x, dy = ty - info.camera_y;
+    return drive_camera(s, tx - info.camera_x, ty - info.camera_y, info);
+}
+
+PadOutput drive_camera(GestureState& s, double dx, double dy, const Info& info) {
+    const double field = info.fields;
     // The original truncates raw input, divides by an integer, rounds scroll
     // to even units, then multiplies by four. One native-image step is 4 px.
     // Short pulses with neutral fields let delayed snapshots retire the motion.
@@ -339,6 +344,20 @@ PadOutput read(GestureState& s, const Info& info, bool blocked) {
         return camera(s, *s.two, cx / 2, cy / 2, info);
     }
     if (s.two) return {};
+    // PC-style scrolling: a target one long step ahead, held while the direction is.
+    int scroll_x = std::clamp(s.scroll.key_x + s.scroll.edge_x, -1, 1);
+    int scroll_y = std::clamp(s.scroll.key_y + s.scroll.edge_y, -1, 1);
+    if ((scroll_x < 0 && info.camera_x <= info.camera_min_x) || (scroll_x > 0 && info.camera_x >= info.camera_max_x)) scroll_x = 0;
+    if ((scroll_y < 0 && info.camera_y <= info.camera_min_y) || (scroll_y > 0 && info.camera_y >= info.camera_max_y)) scroll_y = 0;
+    if ((scroll_x || scroll_y) && mode_is(info, "game") && info.camera_valid && finite(info.camera_divisor)
+        && *info.camera_divisor >= 1 && info.cursor_valid && fresh(info, info.cursor_field, 0)) {
+        if (const auto drive = s.camera_drive) {
+            if (field < drive->until_field) return {button_z, drive->x, drive->y};
+            if (field < drive->settle_field || info.cursor_field.value_or(0) <= drive->until_field) return {};
+            s.camera_drive.reset();
+        }
+        return drive_camera(s, scroll_x * 72.0, scroll_y * 72.0, info);
+    }
     for (const auto& [_, p] : s.contacts) {
         if (!s.two && !s.drag && field - p->field >= 30) {
             if (!s.radial) s.radial = Radial{p->x, p->y, true};

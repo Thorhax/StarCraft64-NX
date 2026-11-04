@@ -1,6 +1,7 @@
 // Switch platform services: SD-card storage and an in-place ROM read.
 #include "platform.hpp"
 #include "mouse_cursor.hpp"
+#include "pointer.hpp"
 #include <filesystem>
 #include <fstream>
 #include <stdexcept>
@@ -29,10 +30,17 @@ std::vector<std::uint8_t> sc64_read_bundled_rom() {
     return rom;
 }
 void sc64_platform_vibrate(int, int) {}
-bool sc64_update_mouse_cursor(bool, const Sc64CursorRegion&, const Sc64CursorRegion*, const Sc64CursorRegion*) {
-    return false; // no mouse pointer on Switch
+SwitchPointer& switch_pointer() { static SwitchPointer pointer; return pointer; }
+// The same rule as the SDL shell: hidden over the mission image, except the HUD and minimap.
+bool sc64_update_mouse_cursor(bool requested, const Sc64CursorRegion& region,
+                              const Sc64CursorRegion* visible_region, const Sc64CursorRegion* minimap_region) {
+    auto& p = switch_pointer();
+    const double x = p.x / 1280, y = 1 - p.y / 720;
+    p.game_cursor = requested && region.contains(x, y) && !(visible_region && visible_region->contains(x, y))
+                    && !(minimap_region && minimap_region->contains(x, y));
+    return p.game_cursor;
 }
-void sc64_restore_mouse_cursor() {}
+void sc64_restore_mouse_cursor() { switch_pointer().game_cursor = false; }
 // libnx threads: std::thread construction fails while the app starts (as in voices.cpp).
 bool sc64_platform_thread(void (*entry)()) {
     static Thread threads[4];

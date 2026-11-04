@@ -2149,3 +2149,27 @@ scaling draw it. `nohd` keeps the N64 portraits.
 transmission boxes draw their portrait inside a larger panel image and keep the
 N64 one.
 
+## ADR-089 — PC keyboard and mouse controls (ACCEPTED, user request 2026-11-04)
+
+**Context:** The user wants a keyboard and mouse, when attached, to work as on PC
+StarCraft, with the controller and touch controls left as they are. The desktop
+shell already maps the mouse to the original cursor (Stage 4), but the Switch
+read only the controller and touch screen, and neither platform scrolled the map
+the PC way.
+
+**Decision:** The Switch reads its USB keyboard and mouse through libnx HID and
+sends them as the desktop shell does: keys without a gamepad id, mouse buttons as
+`touch_mouse` / `pointer_order` / `pointer_pan`, motion with no id. Two PC
+behaviours are added to the shared input code: a mouse confined to the screen
+(the Switch mouse, or a desktop mouse in a fullscreen window) scrolls the map
+while it rests within 3 native pixels of the mission image edge, and keyboard
+arrows (no gamepad id) scroll the map in missions. Both drive the same Z+stick
+camera pulses as the touch camera, one long step at a time, and stop at the map
+bounds. F10 is Start, the PC game-menu key. On Switch an arrow pointer is drawn
+into the framebuffer after mouse use, hidden where the game's cursor already
+follows the mouse and after any touch or controller press.
+
+**Consequences:** A controller D-pad press (gamepad id 0) keeps its original
+meaning, so controller play is unchanged. PC command hotkeys (A, M, S, H, P and
+build letters) are not mapped yet; the N64 shows commands as C-button hints whose
+labels would have to be identified first.

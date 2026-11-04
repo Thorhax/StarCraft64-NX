@@ -104,6 +104,9 @@ struct UiState {
     std::optional<HudPulse> pulse, flash;
 };
 
+// PC-style camera scrolling: keyboard arrows in missions, and the mouse at the
+// edge of the image. -1, 0 or 1 per axis and source; clear() leaves it (held keys).
+struct Scroll { int key_x = 0, key_y = 0, edge_x = 0, edge_y = 0; };
 struct GestureState {
     std::deque<std::shared_ptr<Action>> queue;
     std::map<ContactId, std::shared_ptr<Contact>> contacts;
@@ -135,6 +138,7 @@ struct GestureState {
     std::optional<Sequence> seq;
     std::optional<UiObserved> ui_observed;
     std::optional<TwoPlayerExit> two_player_exit;
+    Scroll scroll;
 };
 
 enum class Phase { down, move, up, cancel };

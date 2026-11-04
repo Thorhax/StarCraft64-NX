@@ -34,6 +34,9 @@ struct InputEvent {
     std::optional<int> gamepad;
     std::optional<double> x, y, screen_x, screen_y;
     std::vector<Touch> touch;
+    // A mouse kept inside the screen (the Switch's USB mouse): not a touch alias, and
+    // its position at the image edge scrolls the map as on PC.
+    bool confined_mouse = false;
 };
 enum class WindowEvent { focus_lost, focus_gained, iconified, restored, resized };
 

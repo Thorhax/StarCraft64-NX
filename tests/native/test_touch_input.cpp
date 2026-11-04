@@ -1030,5 +1030,51 @@ int main() {
     for (const auto& v : native.vibrations)
         CHECK((v.ms == 12 && v.amplitude == 90) || (v.ms == 22 && v.amplitude == 170));
     std::puts("Pointer haptics passed");
+    // PC scrolling: a confined mouse at the image edge and keyboard arrows (no gamepad id)
+    // drive the camera; controller d-pad presses and a free desktop mouse do not.
+    {
+        Shared pc;
+        guest = {};
+        native.size = {960, 720};
+        guest.running = true; guest.width = 320; guest.height = 240;
+        guest.ui_mode = "game"; guest.ui_token = 3; guest.fields = 300; guest.ui_field = 300;
+        guest.cursor_valid = true; guest.cursor_field = 300;
+        guest.camera_valid = true; guest.camera_x = 400; guest.camera_y = 400;
+        guest.camera_min_x = 0; guest.camera_max_x = 1000; guest.camera_min_y = 0; guest.camera_max_y = 1000;
+        guest.camera_divisor = 4;
+        GuiScript scene(pc, native, config, store);
+        scene.init();
+        const auto pread = [&] { return read(pc.gestures, native.guest, false); };
+        auto edge = at_point(959, 360, 959, 360);
+        scene.on_input(nullopt, edge);
+        CHECK(pread().buttons == 0); // a windowed desktop mouse leaves the window instead
+        edge.confined_mouse = true;
+        scene.on_input(nullopt, edge);
+        {
+            const auto p = pread();
+            CHECK(p.buttons == 0x2000 && p.x > 0 && p.y == 0);
+        }
+        auto centre = at_point(480, 360, 480, 360);
+        centre.confined_mouse = true;
+        scene.on_input(nullopt, centre);
+        pc.gestures.camera_drive.reset();
+        CHECK(pread().buttons == 0);
+        scene.on_input("ddown", pressed_event());
+        {
+            const auto p = pread();
+            CHECK(p.buttons == 0x2000 && p.x == 0 && p.y < 0); // map down = stick down
+        }
+        scene.on_input("ddown", released_event());
+        pc.gestures.camera_drive.reset();
+        CHECK(pread().buttons == 0);
+        auto pad_down = gamepad_event(0, true);
+        scene.on_input("ddown", pad_down);
+        CHECK(pc.gestures.scroll.key_y == 0);
+        guest.camera_y = 1000; // the map bottom
+        scene.on_input("ddown", pressed_event());
+        CHECK(pread().buttons == 0);
+        scene.final();
+    }
+    std::puts("PC edge and arrow scrolling passed");
     return 0;
 }
