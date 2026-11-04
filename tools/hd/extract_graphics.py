@@ -4,7 +4,7 @@ usage: STORMLIB=/path/libstorm.so python3 -I extract_graphics.py <StarCraft dir>
 
 Copies, under lower-case names, what native/shell/hd.cpp draws missions with:
   arr/images.dat, arr/images.tbl          Brood War image table (same IDs as the N64 game)
-  tileset/<era>.cv5/.vx4/.vr4/.wpe        the eight terrain tilesets
+  tileset/<era>.cv5/.vx4/.vr4/.wpe/.grp   the eight terrain tilesets (.grp: creep edges)
   unit/**.grp                             every image graphic images.dat names
 from BrooDat.mpq (Brood War) over StarDat.mpq, then Patch_rt.mpq, as the game loads them.
 """
@@ -39,7 +39,7 @@ def main():
         if not data: sys.exit(f'{name} missing')
         total += save(name, data); files += 1
     for era in TILESETS:
-        for ext in ('cv5', 'vx4', 'vr4', 'wpe'):
+        for ext in ('cv5', 'vx4', 'vr4', 'wpe', 'grp'):
             data = read(f'tileset\\{era}.{ext}')
             if data: total += save(f'tileset\\{era}.{ext}', data); files += 1
             else: print(f'tileset {era}.{ext} missing')

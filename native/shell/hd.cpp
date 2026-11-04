@@ -15,6 +15,7 @@
 #include <map>
 #include <mutex>
 #include <thread>
+#include <unordered_map>
 
 namespace sc64::hd {
 namespace {
@@ -25,6 +26,8 @@ constexpr std::uint32_t view_x = 0x800A5B0A, view_y = 0x800A5B0C;    // u16 canv
 constexpr std::uint32_t map_size = 0x800B1D44 + 0xE4;                // u16 tiles wide, high
 constexpr std::uint32_t tile_array = 0x800A2ED4;                     // the game's own (N64) tile array
 constexpr std::uint32_t n64_megatiles = 0x800A2ED0, n64_minitiles = 0x800A2ED8; // its megatile and minitile tables
+constexpr std::uint32_t live_tiles = 0x800A6150;                     // tile IDs as the game updates them (creep)
+constexpr std::uint32_t creep_edges = 0x800EEE78, creep_edges_width = 0x800EEE7C; // u8 per tile: edge frame + 1
 constexpr std::uint32_t mission_palette = 0x800A5F30;                // RGBA16, the tileset's palette
 constexpr std::uint32_t render_canvas = 0x800AFD60;                  // canvas the render functions draw to
 constexpr std::uint32_t hp_bar = 0x80029CC0;                         // render function of health bars (11, 18)
@@ -60,6 +63,7 @@ struct Grp { unsigned width = 0, height = 0; std::vector<GrpFrame> frames; std::
 struct Tileset {
     std::vector<std::uint8_t> cv5, vr4, wpe;
     std::vector<std::uint16_t> vx4;
+    std::shared_ptr<Grp> creep;  // <era>.grp: creep edge frames
     std::vector<float> features; // per minitile: 4x4 RGB box averages, made on first use
     std::vector<float> means;    // per minitile: mean RGB
 };
@@ -132,6 +136,7 @@ void load() {
         t.cv5 = read_file(base.string() + ".cv5");
         t.vr4 = read_file(base.string() + ".vr4");
         t.wpe = read_file(base.string() + ".wpe");
+        t.creep = parse_grp(read_file(base.string() + ".grp"));
         const auto vx4 = read_file(base.string() + ".vx4");
         t.vx4.resize(vx4.size() / 2);
         for (std::size_t k = 0; k < t.vx4.size(); ++k) t.vx4[k] = std::uint16_t(vx4[k * 2] | vx4[k * 2 + 1] << 8);
@@ -145,13 +150,15 @@ void load() {
 // (same 4x4 minitile layout and flips as the PC's, renumbered, half-size minitiles).
 // Each N64 minitile is drawn as its PC minitile: learned from the map's PC MTXM
 // (the loaded chk stays in RAM) where the two agree, otherwise the PC minitile
-// that looks the same at half size. Runtime changes (creep) follow the game.
+// that looks the same at half size. Creep follows the game's live tile IDs, which
+// keep the PC's creep group (1), and its edge frames (docs/research.md).
 struct MapTiles {
     std::uint32_t game_tiles = 0;          // the game's tile array (BE u16 per tile, N64 megatile | flags)
     std::uint32_t megas = 0, minis = 0;    // N64 megatiles (16 BE u16 refs) and minitiles (4x4 bytes)
     unsigned width = 0, height = 0, era = 0;
     bool found = false;                    // the chk (era, MTXM) was found
     std::vector<std::int32_t> mini_map;    // N64 minitile -> PC minitile, -1 unknown, -2 unmatched yet
+    std::vector<std::int32_t> offsets;     // PC - N64 minitile index of the learned ones, most common first
 };
 MapTiles map;
 unsigned match_budget = 0; // content matches allowed this frame
@@ -190,15 +197,29 @@ float distance(const float* a, const float* b) {
     for (unsigned k = 0; k < 48; ++k) d += (a[k] - b[k]) * (a[k] - b[k]);
     return d;
 }
-// The PC minitile closest to an N64 one (brute force; cached in mini_map).
+constexpr float same_look = 48 * 24 * 24; // largest distance of an N64 minitile and its PC original
+// The PC minitile closest to an N64 one (cached in mini_map). Both tables keep the
+// same order with gaps, so the offsets of the learned minitiles come first (creep
+// and other tiles the map file lacks); then, within match_budget, every PC minitile.
+// -2: not matched yet.
 std::int32_t match_minitile(const std::uint8_t* rdram, unsigned mini) {
     Tileset& t = tileset_data[map.era];
     const auto& f = features(t);
     float n64[48], mean[3] = {0, 0, 0};
     n64_features(rdram, t, mini, n64);
-    for (unsigned k = 0; k < 16; ++k) for (unsigned c = 0; c < 3; ++c) mean[c] += n64[k * 3 + c] / 16;
     std::int32_t best = 0;
     float best_d = 1e30f;
+    const std::int64_t pc_minis = std::int64_t(f.size() / 48);
+    for (const std::int32_t o : map.offsets) {
+        const std::int64_t m = std::int64_t(mini) + o;
+        if (m < 0 || m >= pc_minis) continue;
+        const float d = distance(n64, f.data() + m * 48);
+        if (d < best_d) { best_d = d; best = std::int32_t(m); }
+    }
+    if (best_d <= same_look) return best;
+    if (!match_budget) return -2;
+    --match_budget;
+    for (unsigned k = 0; k < 16; ++k) for (unsigned c = 0; c < 3; ++c) mean[c] += n64[k * 3 + c] / 16;
     for (std::size_t m = 0; m < f.size() / 48; ++m) {
         // 16 x the squared mean difference never exceeds the distance: most candidates stop here.
         const float* pm = t.means.data() + m * 3;
@@ -234,12 +255,14 @@ bool locate_map(const std::uint8_t* rdram, unsigned width, unsigned height) {
         if (e == it) continue;
         map.era = (e[8] | e[9] << 8) & 7;
         map.found = true;
-        // Learn N64 -> PC minitiles where the map's PC tile and the game's tile agree
-        // (same flips, same look at half size); creep laid at the start does not.
+        // Learn N64 -> PC minitiles where the map's PC tile and the game's tile agree:
+        // same flips, the PC minitile most often under the N64 one (creep laid at the
+        // start covers many different tiles), same look at half size.
         Tileset& tileset = tileset_data[map.era];
         const auto& f = features(tileset);
         const std::size_t groups = tileset.cv5.size() / 52, pc_megas = tileset.vx4.size() / 16, pc_minis = f.size() / 48;
         std::size_t learned = 0;
+        std::unordered_map<unsigned, std::unordered_map<unsigned, unsigned>> votes; // N64 minitile -> PC minitile -> count
         for (std::size_t pos = 0; pos < std::size_t(width) * height; ++pos) {
             const unsigned pc_tile = ram[at + 8 + pos * 2] | ram[at + 9 + pos * 2] << 8;
             const unsigned n = gh(rdram, map.game_tiles + std::uint32_t(pos) * 2) & 0x7fff;
@@ -250,17 +273,31 @@ bool locate_map(const std::uint8_t* rdram, unsigned width, unsigned height) {
             for (unsigned k = 0; k < 16; ++k) {
                 const unsigned rn = gh(rdram, map.megas + n * 32 + k * 2), rp = tileset.vx4[pc_mega * 16 + k];
                 if ((rn & 1) != (rp & 1) || (rp >> 1) >= pc_minis) continue;
-                const unsigned mini = rn >> 1;
-                if (mini >= map.mini_map.size()) map.mini_map.resize(mini + 1, -2);
-                if (map.mini_map[mini] >= 0) continue;
-                float n64[48];
-                n64_features(rdram, tileset, mini, n64);
-                if (distance(n64, f.data() + std::size_t(rp >> 1) * 48) > 48 * 24 * 24) continue;
-                map.mini_map[mini] = std::int32_t(rp >> 1);
-                ++learned;
+                ++votes[rn >> 1][rp >> 1];
             }
         }
-        sc64::shell::log::info("hd: map %ux%u, %s, %zu minitiles from its PC tiles", width, height, tilesets[map.era], learned);
+        std::map<std::int32_t, unsigned> offsets;
+        for (const auto& [mini, counts] : votes) {
+            unsigned total = 0, most = 0, pc = 0;
+            for (const auto& [candidate, count] : counts) {
+                total += count;
+                if (count > most) { most = count; pc = candidate; }
+            }
+            if (most * 2 <= total) continue;
+            float n64[48];
+            n64_features(rdram, tileset, mini, n64);
+            if (distance(n64, f.data() + std::size_t(pc) * 48) > same_look) continue;
+            if (mini >= map.mini_map.size()) map.mini_map.resize(mini + 1, -2);
+            map.mini_map[mini] = std::int32_t(pc);
+            ++offsets[std::int32_t(pc) - std::int32_t(mini)];
+            ++learned;
+        }
+        std::vector<std::pair<unsigned, std::int32_t>> ranked;
+        for (const auto& [o, count] : offsets) ranked.emplace_back(count, o);
+        std::sort(ranked.rbegin(), ranked.rend());
+        for (const auto& r : ranked) map.offsets.push_back(r.second);
+        sc64::shell::log::info("hd: map %ux%u, %s, %zu minitiles from its PC tiles (%zu offsets)", width, height,
+                               tilesets[map.era], learned, map.offsets.size());
         return true;
     }
     // No chk in memory: the tileset whose palette the game shows, every minitile by its look.
@@ -302,7 +339,7 @@ const std::uint8_t* megatile(const std::uint8_t* rdram, unsigned n, bool& comple
         const unsigned ref = gh(rdram, map.megas + n * 32 + k * 2), mini = ref >> 1;
         if (mini >= map.mini_map.size()) map.mini_map.resize(mini + 1, -2);
         std::int32_t& pc = map.mini_map[mini];
-        if (pc < 0 && match_budget) { pc = match_minitile(rdram, mini); --match_budget; }
+        if (pc < 0) pc = match_minitile(rdram, mini);
         const unsigned bx = (k % 4) * 8, by = (k / 4) * 8;
         for (unsigned y = 0; y < 8; ++y)
             for (unsigned x = 0; x < 8; ++x)
@@ -315,6 +352,66 @@ const std::uint8_t* megatile(const std::uint8_t* rdram, unsigned n, bool& comple
     mega_cache.slot[n] = std::int32_t(mega_cache.pixels.size() / 1024);
     mega_cache.pixels.insert(mega_cache.pixels.end(), out, out + 1024);
     return mega_cache.pixels.data() + std::size_t(mega_cache.slot[n]) * 1024;
+}
+
+// 32x32 PC pixels of a PC megatile (creep), cached.
+struct PcMegaCache { std::vector<std::int32_t> slot; std::vector<std::uint8_t> pixels; unsigned era = ~0u; };
+PcMegaCache pc_mega_cache;
+const std::uint8_t* pc_megatile(unsigned m) {
+    PcMegaCache& cache = pc_mega_cache;
+    if (cache.era != map.era) cache = {{}, {}, map.era};
+    if (m < cache.slot.size() && cache.slot[m] >= 0) return cache.pixels.data() + std::size_t(cache.slot[m]) * 1024;
+    const Tileset& t = tileset_data[map.era];
+    if (m >= t.vx4.size() / 16) return nullptr;
+    std::array<std::uint8_t, 1024> out{};
+    for (unsigned k = 0; k < 16; ++k) {
+        const unsigned ref = t.vx4[m * 16 + k], mini = ref >> 1;
+        if (std::size_t(mini) * 64 + 64 > t.vr4.size()) return nullptr;
+        for (unsigned y = 0; y < 8; ++y)
+            for (unsigned x = 0; x < 8; ++x)
+                out[((k / 4) * 8 + y) * 32 + (k % 4) * 8 + x] = t.vr4[std::size_t(mini) * 64 + y * 8 + ((ref & 1) ? 7 - x : x)];
+    }
+    if (m >= cache.slot.size()) cache.slot.resize(m + 1, -1);
+    cache.slot[m] = std::int32_t(cache.pixels.size() / 1024);
+    cache.pixels.insert(cache.pixels.end(), out.begin(), out.end());
+    return cache.pixels.data() + std::size_t(cache.slot[m]) * 1024;
+}
+// The PC megatile of a creep tile ID (cv5 group 1), or none.
+const std::uint8_t* creep_megatile(unsigned id) {
+    if ((id & 0x7fff) >> 4 != 1) return nullptr;
+    const auto& cv5 = tileset_data[map.era].cv5;
+    if (cv5.size() < 2 * 52) return nullptr;
+    const unsigned at = 52 + 20 + (id & 15) * 2;
+    const unsigned m = cv5[at] | cv5[at + 1] << 8;
+    return m ? pc_megatile(m) : nullptr;
+}
+// The creep edge frame on a tile beside creep (game tile flag 0x8000; 0x8000A10C draws
+// the same frame of the game's own edge graphic), its pixels over the terrain bytes:
+// w x h, (x0, y0) the tile's top left, guest byte order.
+void draw_creep_edge(std::uint8_t* bytes, unsigned w, unsigned h, int x0, int y0, unsigned frame) {
+    const auto& grp = tileset_data[map.era].creep;
+    if (!grp || frame >= grp->frames.size() || !grp->frames[frame].size) return;
+    const GrpFrame& f = grp->frames[frame];
+    const auto& d = grp->data;
+    const int left = x0 + f.x - int(grp->width) / 2 + 16, top = y0 + f.y - int(grp->height) / 2 + 16;
+    for (unsigned line = 0; line < f.h; ++line) {
+        const int y = top + int(line);
+        std::size_t p = f.offset + (d[f.offset + line * 2] | d[f.offset + line * 2 + 1] << 8);
+        for (unsigned lx = 0; lx < f.w && p < d.size();) {
+            const unsigned c = d[p++];
+            unsigned run = c & 0x7f;
+            if (c & 0x80) { lx += run; continue; }
+            const bool fill = c & 0x40;
+            if (fill) run = c & 0x3f;
+            for (unsigned k = 0; k < run && p < d.size(); ++k) {
+                const int x = left + int(lx + k);
+                const std::uint8_t v = fill ? d[p] : d[p + k];
+                if (y >= 0 && y < int(h) && x >= 0 && x < int(w)) bytes[(std::size_t(y) * w + unsigned(x)) ^ 3] = v;
+            }
+            p += fill ? 1 : run;
+            lx += run;
+        }
+    }
 }
 
 // ---- HD canvases in guest memory (the render functions draw there)
@@ -373,10 +470,15 @@ void draw_terrain(std::uint8_t* rdram, const Canvas& c, int cam_x, int cam_y, in
     const int tx0 = std::max(0, (cam_x - 2 * vx) / 32), ty0 = std::max(0, (cam_y - 2 * vy) / 32);
     const int tx1 = std::min(int(map.width), (cam_x - 2 * vx + int(w)) / 32 + 1);
     const int ty1 = std::min(int(map.height), (cam_y - 2 * vy + int(h)) / 32 + 1);
+    const std::uint32_t live = gw(rdram, live_tiles), edges = gw(rdram, creep_edges);
+    const bool creep = (live >> 24) == 0x80 && (edges >> 24) == 0x80 && gw(rdram, creep_edges_width) == map.width;
     std::uint64_t hash = 14695981039346656037ull;
     for (int ty = ty0; ty < ty1; ++ty)
-        for (int tx = tx0; tx < tx1; ++tx)
-            hash = mix(hash, gh(rdram, map.game_tiles + std::uint32_t(ty * int(map.width) + tx) * 2));
+        for (int tx = tx0; tx < tx1; ++tx) {
+            const std::uint32_t pos = std::uint32_t(ty * int(map.width) + tx);
+            hash = mix(hash, gh(rdram, map.game_tiles + pos * 2));
+            if (creep) hash = mix(hash, std::uint32_t(gh(rdram, live + pos * 2)) << 8 | gb(rdram, edges + pos));
+        }
     TerrainCache& cache = terrain_cache;
     if (cache.cam_x == cam_x && cache.cam_y == cam_y && cache.vx == vx && cache.vy == vy && cache.w == w && cache.h == h
         && cache.tiles == hash && cache.game_tiles == map.game_tiles && cache.bytes.size() == std::size_t(w) * h) {
@@ -385,7 +487,7 @@ void draw_terrain(std::uint8_t* rdram, const Canvas& c, int cam_x, int cam_y, in
     }
     cache = {cam_x, cam_y, vx, vy, w, h, hash, map.game_tiles, std::move(cache.bytes)};
     cache.bytes.resize(std::size_t(w) * h);
-    match_budget = 4; // content matches per redraw (a few hundred microseconds each)
+    match_budget = 4; // full content matches per redraw (a few hundred microseconds each)
     bool complete = true;
     const std::uint32_t megas = (map.minis - map.megas) / 32;
     std::vector<std::uint8_t> row(w + 4);
@@ -400,7 +502,8 @@ void draw_terrain(std::uint8_t* rdram, const Canvas& c, int cam_x, int cam_y, in
                 const unsigned n = gh(rdram, map.game_tiles + (ty * map.width + tx) * 2) & 0x7fff;
                 const unsigned run = std::min(32 - px, unsigned(right - x));
                 bool whole = true;
-                const std::uint8_t* block = n < megas ? megatile(rdram, n, whole) : nullptr;
+                const std::uint8_t* block = creep ? creep_megatile(gh(rdram, live + (ty * map.width + tx) * 2)) : nullptr;
+                if (!block) block = n < megas ? megatile(rdram, n, whole) : nullptr;
                 complete &= whole;
                 if (block) {
                     const std::uint8_t* src = block + py * 32 + px;
@@ -417,6 +520,14 @@ void draw_terrain(std::uint8_t* rdram, const Canvas& c, int cam_x, int cam_y, in
         }
         std::memcpy(cache.bytes.data() + std::size_t(y) * w, row.data(), w);
     }
+    if (creep)
+        for (int ty = ty0; ty < ty1; ++ty)
+            for (int tx = tx0; tx < tx1; ++tx) {
+                const std::uint32_t pos = std::uint32_t(ty * int(map.width) + tx);
+                const unsigned edge = gb(rdram, edges + pos);
+                if (edge && (gh(rdram, map.game_tiles + pos * 2) & 0x8000))
+                    draw_creep_edge(cache.bytes.data(), w, h, tx * 32 - cam_x + 2 * vx, ty * 32 - cam_y + 2 * vy, edge - 1);
+            }
     if (!complete) cache.tiles = ~hash; // not kept: unmatched minitiles get matched over the next frames
     std::memcpy(rdram + offset(c.pixels), cache.bytes.data(), cache.bytes.size());
 }
