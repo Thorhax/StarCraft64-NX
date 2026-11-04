@@ -1,6 +1,7 @@
 #include "ui_feedback.hpp"
 #include "guest_addresses.hpp"
 #include "minimap.hpp"
+#include "pc_hotkeys.hpp"
 #if defined(SC64_VOICES)
 #include "voices.hpp"
 #endif
@@ -9,6 +10,7 @@
 #endif
 #include <recomp.h>
 #include <algorithm>
+#include <array>
 #include <mutex>
 #include <atomic>
 #include <bit>
@@ -34,6 +36,8 @@ std::vector<sc64::runtime::UiItem> encyclopedia_links;
 sc64::runtime::FrontendFeedback presented;
 bool briefing_active = false;
 thread_local bool b_hint_pending = false;
+// The command ID each C hint queried (0x800712DC) before its label draws.
+thread_local std::array<std::uint32_t, 4> hint_commands{};
 bool hud_complete = false;
 std::atomic<sc64::runtime::MinimapHandler> minimap_handler{nullptr};
 bool address(std::uint32_t a, unsigned length) {
@@ -193,6 +197,7 @@ extern "C" void sc64_ui_hud_font(std::uint8_t* ram, recomp_context* ctx, unsigne
     // Recompiled direct native calls do not populate the guest RA register.
     // Observe exact caller PCs instead. B's return PC is also a skip target;
     // require its call-site observer before accepting a completed B label.
+    if (kind==3) { if (ctx->r17<4) hint_commands[ctx->r17]=std::uint32_t(ctx->r2); return; }
     if (kind==1) { b_hint_pending=true; return; }
     if (kind==2) { if (!b_hint_pending) return; b_hint_pending=false; }
     else if (kind!=0) return;
@@ -216,6 +221,21 @@ extern "C" void sc64_ui_hud_font(std::uint8_t* ram, recomp_context* ctx, unsigne
         if (layout!=0x800a2424+item.id*18) return;
         icon_x=half(ram,layout+14); icon_y=half(ram,layout+16);
     } else { item.id=4; item.buttons=0x4000; }
+    // The label text names the command: C hints index 0x800A24FC by their command
+    // ID, the B hint indexes 0x800A2B1C by 0x800B1720 (80007F2C..80007F44).
+    const std::uint32_t command=kind==0 ? hint_commands[item.id] : byte(ram,0x800b1720);
+    const std::uint32_t entry=(kind==0 ? 0x800a24fcu : 0x800a2b1cu)+command*4;
+    if (command<0x400 && address(entry,4)) {
+        const auto text=word(ram,entry);
+        std::string label;
+        for (unsigned i=0; i<24 && address(text+i,1); ++i) {
+            const char c=char(byte(ram,text+i));
+            if (!c) break;
+            label.push_back(c);
+        }
+        item.hotkey=sc64::runtime::hotkey_for_label(label);
+        item.grid=sc64::runtime::grid_label(label);
+    }
     // The icon blit source rectangle is (0,0)-(11,10), inclusive.
     item.x0=std::min(item.x0,float(icon_x)); item.y0=std::min(item.y0,float(icon_y));
     item.x1=std::max(item.x1,float(icon_x+12)); item.y1=std::max(item.y1,float(icon_y+11));

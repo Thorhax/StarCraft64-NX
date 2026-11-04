@@ -26,6 +26,7 @@
 #include <pthread.h>
 #include <algorithm>
 #include <array>
+#include <bitset>
 #include <cstdio>
 #include <cstring>
 #include <exception>
@@ -514,6 +515,12 @@ struct App {
         touch.x = px * design_width / screen_w; touch.y = (screen_h - py) * design_height / screen_h;
         return touch;
     }
+    std::bitset<256> hotkeys_held; // HID usages consumed as PC hotkeys until released
+    bool hotkey(char key, bool ctrl) {
+        InputEvent event;
+        event.id = "hotkey"; event.pressed = true; event.key = key; event.ctrl = ctrl;
+        return gui->on_input(event.id, event);
+    }
     // Keyboard actions carry no gamepad id, like the desktop shell's.
     void key_action(const char* id, bool pressed) {
         InputEvent event;
@@ -532,12 +539,22 @@ struct App {
     void poll_keyboard_mouse() {
         HidKeyboardState k{};
         if (hidGetKeyboardStates(&k, 1)) {
+            // In a mission letters and digits are PC hotkeys; their release stays there too.
+            const bool ctrl = (k.modifiers & HidKeyboardModifier_Control) != 0;
+            for (int usage = HidKeyboardKey_A; usage <= HidKeyboardKey_D0; ++usage) {
+                const auto key = HidKeyboardKey(usage);
+                const bool now = hidKeyboardStateGetKey(&k, key), before = hidKeyboardStateGetKey(&keyboard, key);
+                if (now && !before && hotkey(usage_key(usage), ctrl)) hotkeys_held.set(std::size_t(usage));
+            }
             auto edge = [&](const KeyBinding& b) {
                 const bool now = hidKeyboardStateGetKey(&k, b.key), before = hidKeyboardStateGetKey(&keyboard, b.key);
+                if (hotkeys_held.test(std::size_t(b.key))) return;
                 if (now != before) key_action(b.action, now);
             };
             for (const auto& binding : key_bindings) edge(binding);
             edge(tab_binding);
+            for (int usage = HidKeyboardKey_A; usage <= HidKeyboardKey_D0; ++usage)
+                if (!hidKeyboardStateGetKey(&k, HidKeyboardKey(usage))) hotkeys_held.reset(std::size_t(usage));
             keyboard = k;
         }
         HidMouseState m{};

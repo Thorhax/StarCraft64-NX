@@ -774,4 +774,55 @@ int main() {
         assert(read(gs, gi, false).buttons == 0x0400 && gs.ui);
     }
     std::puts("Unexposed menu selection cancels with a notice passed");
+
+    // PC hotkeys (ADR-091): a hint key presses its button, a key inside a grid
+    // opens that grid and clicks the cell, digits play the group chords.
+    {
+        GestureState k;
+        Info game;
+        game.running = true; game.width = 320; game.height = 240; game.ui_mode = "game"; game.ui_token = 3;
+        game.fields = 100; game.ui_field = 100; game.cursor_valid = true; game.cursor_field = 100;
+        game.ui_items = {UiItem{.id = 2, .group = 4, .x0 = 250, .y0 = 180, .x1 = 290, .y1 = 195, .buttons = 1,
+                                .hotkey = 'm'},
+                         UiItem{.id = 1, .group = 4, .x0 = 190, .y0 = 180, .x1 = 230, .y1 = 195, .buttons = 2,
+                                .hotkey = 'b', .grid = true}};
+        assert(hotkeys::key(k, 'm', false, game));
+        assert(read(k, game, false).buttons == 1); // Move: C-Right
+        clear(k);
+        Info menu = game; menu.ui_mode = "menu";
+        assert(!hotkeys::key(k, 'm', false, menu)); // outside a mission keys keep their bindings
+        // Barracks: 'm' is not on a hint, so the grid hint opens and the Marine cell is clicked.
+        assert(hotkeys::key(k, 'q', false, game) && k.hotkey);
+        assert(read(k, game, false).buttons == 2);
+        Info grid = game;
+        grid.ui_mode = "build"; grid.ui_token = 0x8035d300; grid.fields = 110; grid.ui_field = 110;
+        grid.ui_items = {UiItem{.id = 0, .group = 1, .x0 = 232, .y0 = 150, .x1 = 252, .y1 = 170, .columns = 3,
+                                .selected = true, .activate = true, .hotkey = 'm'}};
+        assert(read(k, grid, false).buttons == button_b && k.hotkey && k.hotkey->closing); // no 'q' cell: close
+        grid.fields = 120; grid.ui_field = 120;
+        Info back = game; back.fields = 125; back.ui_field = 125;
+        read(k, back, false);
+        assert(!k.hotkey && k.notice == hotkeys::missing_notice); // the only grid had no 'q'
+        clear(k);
+        assert(hotkeys::key(k, 'm', false, Info(game)) && !k.hotkey); // a hint wins over grids
+        clear(k);
+        game.ui_items.erase(game.ui_items.begin()); // no Move hint now
+        assert(hotkeys::key(k, 'm', false, game) && k.hotkey);
+        grid.fields = 130; grid.ui_field = 130;
+        read(k, grid, false);
+        assert(!k.hotkey && k.ui); // the Marine cell is clicked through ui_input
+        grid.fields = 132; grid.ui_field = 132;
+        assert(read(k, grid, false).buttons == button_a); // already selected: A
+        // Groups: ctrl+2 assigns with R+C-Left, 3 recalls with Z+C-Right, 5 has no group.
+        clear(k); game.fields = 200; game.ui_field = 200;
+        assert(hotkeys::key(k, '2', true, game));
+        assert(read(k, game, false).buttons == button_r);
+        game.fields = 204; assert(read(k, game, false).buttons == (button_r | 0x0002));
+        clear(k); game.fields = 220; game.ui_field = 220;
+        assert(hotkeys::key(k, '3', false, game));
+        game.fields = 225; assert(read(k, game, false).buttons == (button_z | 0x0001));
+        clear(k);
+        assert(hotkeys::key(k, '5', false, game) && !k.seq && k.notice == hotkeys::group_notice);
+    }
+    std::puts("PC hotkeys passed");
 }

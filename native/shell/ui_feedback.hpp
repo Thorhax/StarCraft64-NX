@@ -1,6 +1,7 @@
 #pragma once
 #include "../runtime/ui_feedback.hpp"
 #include "../runtime/guest_addresses.hpp"
+#include "../runtime/pc_hotkeys.hpp"
 #include <algorithm>
 #include <array>
 #include <span>
@@ -173,6 +174,9 @@ inline UiFeedback read_ui(std::span<const std::uint8_t> ram, std::uint64_t field
                 item.id = button-1; item.columns = 3;
                 item.selected = item.id == word(0xafe9c); // value used by the cell draw callback
                 item.activate = (flags & 2) == 0;
+                // +0x28: the cell's button record (PC layout); +0x10 its PC text ID.
+                if (const auto record = word(p+0x28); pointer(record))
+                    item.hotkey = runtime::hotkey_for_string(std::uint16_t(half((record & 0x7fffff) + 0x10)));
             }
             item.x0 = x + half(p+4); item.y0 = y + half(p+6);
             item.x1 = x + half(p+8); item.y1 = y + half(p+10);

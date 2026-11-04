@@ -20,6 +20,8 @@ struct UiItem {
     double id = 0, group = 0, x0 = 0, y0 = 0, x1 = 0, y1 = 0;
     std::optional<double> columns, buttons, context, label;
     bool selected = false, horizontal = false, activate = false;
+    char hotkey = 0;   // PC key of this command hint or grid cell
+    bool grid = false; // a hint that opens a command grid
 };
 struct CursorPick {
     double x = 0, y = 0, context = 0, buttons = 0, target_type = 0;

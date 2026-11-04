@@ -2195,3 +2195,33 @@ mission, so the next lines and cinematics do not follow the previous mission.
 **Consequences:** N64-only briefings and messages stay silent, as the N64
 original is. The N64 cheat-code messages with reworded first sentences still
 play the PC "Cheat code downloaded" line.
+
+## ADR-091 — PC hotkeys, control groups, instant mouse cursor, minimap clicks (ACCEPTED, user request 2026-11-04)
+
+**Context:** Testing a keyboard and mouse on the Switch, the user found the game
+cursor trailing the mouse in missions, minimap clicks not moving the camera, and
+asked for the PC keyboard commands (select an SCV, B B builds a Barracks) and
+PC control groups (Ctrl+1 sets group 1).
+
+**Decision:**
+- The mouse places the game cursor directly, as touch already did (the guarded
+  cursor warp); the ADR-066 stick servo remains only where no warp exists
+  (fixtures).
+- A minimap request is valid while the cursor snapshot it came from is at most
+  12 fields old; requiring the newest snapshot rejected nearly every click once
+  snapshots arrived every field. The map-geometry context still fences it.
+- In a mission, keyboard letters and digits go to a hotkey adapter before
+  their controller bindings. A hook reads each C hint's command ID; its label
+  gives the PC key (`pc_hotkeys.hpp`). Grid cells take the key of their button
+  record's PC text. A letter presses the hint with that key; otherwise the
+  hints that open grids (Build, BuildAdv, Ground Units, Air Units, Tech,
+  Res/Upg, Upgrades etc) are opened in turn until a cell has the key, which is
+  then clicked like a mouse click (B closes a grid without it). Inside an open
+  grid a letter clicks its cell. Outside missions the letters keep their
+  controller bindings.
+- Digits 1-4 recall the original groups (Z, Z+C, Z) and Ctrl+1-4 assign them
+  (R, R+C, R), C-Up/C-Left/C-Right/C-Down for groups 1-4. 5-0 show a notice.
+
+**Consequences:** All commands stay original controller input. A key whose
+command lies in a grid other than the first can briefly open and close the
+grids before it. Groups are limited to the N64's four.

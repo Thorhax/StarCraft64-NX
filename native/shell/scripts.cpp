@@ -839,6 +839,8 @@ bool GuiScript::pad_pointer(const std::string& key, const InputEvent& a, const I
 bool GuiScript::on_input(const std::optional<std::string>& id, const InputEvent& action) {
     auto& s = shared_.pad;
     auto& g = shared_.gestures;
+    // PC keys in a mission; elsewhere the key keeps its controller binding.
+    if (id && *id == "hotkey") return action.pressed && input::hotkeys::key(g, action.key, action.ctrl, native_.info());
     if (action.pressed && id) {
         if (*id == "touch_toggle") { s.enabled = !s.enabled; touch_pad::clear(s); input::clear(g); return true; }
         if (*id == "touch_edit" && touch_pad::visible(s)) {

@@ -22,6 +22,7 @@ if(NOT TARGET sc64_input)
     add_library(sc64_input STATIC
         ${SC64_ROOT}/native/shell/input/gestures.cpp ${SC64_ROOT}/native/shell/input/map_taps.cpp
         ${SC64_ROOT}/native/shell/input/minimap_input.cpp ${SC64_ROOT}/native/shell/input/hud_buttons.cpp
+        ${SC64_ROOT}/native/shell/input/hotkeys.cpp
         ${SC64_ROOT}/native/shell/input/hud_input.cpp ${SC64_ROOT}/native/shell/input/ui_input.cpp
         ${SC64_ROOT}/native/shell/input/devices.cpp)
     target_include_directories(sc64_input PUBLIC "${SC64_ROOT}/native/shell/input")

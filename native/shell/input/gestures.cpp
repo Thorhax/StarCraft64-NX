@@ -295,11 +295,12 @@ void pan_pointer(GestureState& s, Phase phase, double x, double y) {
 
 PadOutput read(GestureState& s, const Info& info, bool blocked) {
     const double field = info.fields;
-    if (blocked || !s.enabled) { clear(s); return {}; }
+    if (blocked || !s.enabled) { clear(s); s.hotkey.reset(); return {}; }
     if (s.minimap || s.minimap_request) {
         if (!mode_is(info, "game") || !info.minimap) s.minimap_request.reset();
         return {};
     }
+    if (const auto key = hotkeys::read(s, info)) return *key;
     if (const auto ui = ui_input::read(s, info)) return *ui;
     if (s.pulse) {
         if (field < s.pulse->until_field) return {s.pulse->buttons};
@@ -395,7 +396,8 @@ PadOutput read(GestureState& s, const Info& info, bool blocked) {
     if (!s.active && !s.drag && s.hover) {
         s.drive.reset(); s.settle_until = 0;
         const bool touch = s.hover->touch;
-        if (touch && warp_cursor) { s.follow.reset(); warp_cursor(s.hover->x, s.hover->y); return {}; }
+        // Touch and mouse alike place the cursor at once (a mouse servo lagged behind it).
+        if (warp_cursor) { s.follow.reset(); warp_cursor(s.hover->x, s.hover->y); return {}; }
         const auto [x, y] = follow_mouse(s, info, Point{s.hover->x, s.hover->y},
             touch ? servo.action_step_cap : servo.hover_step_cap,
             touch ? servo.action_horizon : servo.hover_horizon,

@@ -90,6 +90,17 @@ std::optional<unsigned> read(GestureState& s, const Info& info);
 std::optional<Feedback> feedback(GestureState& s, const Info& info);
 }
 
+// hotkeys: PC keyboard commands in a mission (ADR-091). A letter presses the hint
+// with that PC key; otherwise the grids its hints open are searched for a cell
+// with it. Digits 1-4 recall the original groups, with ctrl assign them.
+namespace hotkeys {
+inline constexpr std::string_view group_notice = "StarCraft 64 has four groups: 1-4";
+inline constexpr std::string_view missing_notice = "No command for that key";
+// True when the key belongs to the mission (consumed), false outside missions.
+bool key(GestureState& s, char key, bool ctrl, const Info& info);
+std::optional<PadOutput> read(GestureState& s, const Info& info);
+}
+
 // ui_input: menu clicks navigate the original selection through D-pad pulses.
 namespace ui_input {
 constexpr double pulse_fields = 4, neutral_fields = 4, retry_fields = 30;

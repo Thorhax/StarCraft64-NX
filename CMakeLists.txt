@@ -11,6 +11,7 @@ add_subdirectory(native/gfx_core)
 # Engine-independent pointer/controller adapters and digests: no SDL, no game.
 add_library(sc64_input STATIC
     native/shell/input/gestures.cpp native/shell/input/map_taps.cpp native/shell/input/minimap_input.cpp
+    native/shell/input/hotkeys.cpp
     native/shell/input/hud_buttons.cpp native/shell/input/hud_input.cpp native/shell/input/ui_input.cpp
     native/shell/input/devices.cpp)
 target_include_directories(sc64_input PUBLIC native/shell/input)

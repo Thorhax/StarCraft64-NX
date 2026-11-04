@@ -52,6 +52,14 @@ struct Drive { double x = 0, y = 0, until_field = 0; };
 struct CameraDrive { double x = 0, y = 0, until_field = 0, settle_field = 0; };
 struct Follow { double field = 0, x = 0, y = 0, vx = 0, vy = 0; };
 struct Sequence { Steps steps; std::size_t index = 0; double until_field = 0; };
+// A PC key looking for its command in the grids the hints open (hotkeys.cpp).
+struct HotkeySearch {
+    char letter = 0;
+    std::vector<unsigned> openers; // hint buttons, tried in order
+    std::size_t index = 0;
+    bool closing = false;          // B sent to close a grid without the key
+    double press_until = 0, give_up = 0;
+};
 struct HudRegion { Bounds bounds; std::optional<double> context; double field = 0; };
 struct MinimapGesture {
     ContactId contact;
@@ -136,6 +144,7 @@ struct GestureState {
     std::optional<std::string> button_hover;
     std::shared_ptr<Action> tap;
     std::optional<Sequence> seq;
+    std::optional<HotkeySearch> hotkey;
     std::optional<UiObserved> ui_observed;
     std::optional<TwoPlayerExit> two_player_exit;
     Scroll scroll;

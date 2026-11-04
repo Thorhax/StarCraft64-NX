@@ -15,6 +15,9 @@ struct UiItem {
     unsigned buttons = 0;
     std::uint32_t context = 0;
     std::uint32_t label = 0;
+    // PC key of a command hint or grid cell (pc_hotkeys.hpp); grid: the hint opens a grid.
+    char hotkey = 0;
+    bool grid = false;
 };
 struct UiBounds {
     float x0 = 0, y0 = 0, x1 = 0, y1 = 0;

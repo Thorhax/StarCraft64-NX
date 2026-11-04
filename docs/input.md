@@ -96,6 +96,8 @@ for the handoff, local-build risks and device acceptance checklist.
 | Mouse at the edge of the mission image (Switch USB mouse; desktop fullscreen) | PC edge scrolling: Z+stick toward that edge until the map bound (ADR-089) |
 | Arrow keys in a mission | PC scrolling, as edge scrolling; a controller D-pad keeps its original meaning |
 | F10 | Start (the PC game-menu key) |
+| Letter keys in a mission | PC hotkeys: the command hint with that PC key (M move, A attack, S stop, H hold, P patrol, G gather, B build, V advanced build, spells), otherwise the grid cell with it (B then B: Barracks; Barracks then M: Marine). Outside missions the letters keep their controller bindings (ADR-091) |
+| 1-4 / Ctrl+1-4 in a mission | Recall / assign the original group 1-4 (Z+C / R+C chords); the N64 has no groups 5-0 |
 | F3 | Enable/disable diagnostic pad |
 | F4 while pad visible | Edit layout; press again to save |
 | F6 while using pad | Select player 1/2 for diagnostic pad |

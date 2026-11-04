@@ -37,7 +37,16 @@ struct InputEvent {
     // A mouse kept inside the screen (the Switch's USB mouse): not a touch alias, and
     // its position at the image edge scrolls the map as on PC.
     bool confined_mouse = false;
+    // "hotkey": a keyboard letter or digit, before its controller binding (ADR-091).
+    char key = 0;
+    bool ctrl = false;
 };
+// The letter or digit of a USB HID keyboard usage (SDL scancodes and libnx
+// HidKeyboardKey share the numbering), or 0.
+inline char usage_key(int usage) {
+    return usage >= 4 && usage <= 29 ? char('a' + usage - 4) : usage >= 30 && usage <= 38 ? char('1' + usage - 30)
+         : usage == 39 ? '0' : 0;
+}
 enum class WindowEvent { focus_lost, focus_gained, iconified, restored, resized };
 
 // Configuration values: command-line `--config=sc64.key=value` pairs or

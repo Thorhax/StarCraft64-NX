@@ -24,6 +24,7 @@
 #include <cmath>
 #include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <utility>
 
@@ -105,6 +106,12 @@ struct App {
     // A real mouse in a fullscreen window edge-scrolls the map as on PC.
     bool confined(SDL_MouseID which) const {
         return which != SDL_TOUCH_MOUSEID && (SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN);
+    }
+    std::set<SDL_Scancode> hotkeys_held;
+    bool hotkey(char key, bool ctrl) {
+        InputEvent event;
+        event.id = "hotkey"; event.pressed = true; event.key = key; event.ctrl = ctrl;
+        return gui->on_input(event.id, event);
     }
     void dispatch(const InputEvent& event) {
         if (!gui->on_input(event.id, event) && event.id) host->on_input(*event.id, event);
@@ -277,6 +284,14 @@ SDL_AppResult SDL_AppEvent(void* state, SDL_Event* event) {
         case SDL_EVENT_KEY_UP: {
             if (event->key.repeat) break;
             const bool pressed = event->type == SDL_EVENT_KEY_DOWN;
+            // In a mission letters and digits are PC hotkeys; their release stays there too.
+            if (const char key = usage_key(int(event->key.scancode))) {
+                if (pressed && app.hotkey(key, (event->key.mod & SDL_KMOD_CTRL) != 0)) {
+                    app.hotkeys_held.insert(event->key.scancode);
+                    break;
+                }
+                if (!pressed && app.hotkeys_held.erase(event->key.scancode)) break;
+            }
             for (const auto& binding : key_bindings)
                 if (binding.scancode == event->key.scancode) app.action(binding.action, pressed);
             if (reset_binding.scancode == event->key.scancode) app.action(reset_binding.action, pressed);

@@ -26,6 +26,8 @@ SITES = (
     ('sc64_menu_80127DB4', 0x80128274, 0xDECC4, 0x9462000A, 'briefing_on'),
     ('sc64_menu_80127DB4', 0x80128900, 0xDF350, 0x03E00008, 'briefing_off'),
     ('sc64_resident_80007C7C', 0x80007DC4, 0x89C4, 0x3C03800A, 'hud_begin'),
+    # The command ID of each C hint (v0 of its 0x800712DC query; s1 is the slot).
+    ('sc64_resident_80007C7C', 0x80007E18, 0x8A18, 0x00408021, 'hud_font_3'),
     ('sc64_resident_80007C7C', 0x80007EC8, 0x8AC8, 0xAEF059F4, 'hud_font_0'),
     ('sc64_resident_80007C7C', 0x80007FBC, 0x8BBC, 0x0C008476, 'hud_font_1'),
     ('sc64_resident_80007C7C', 0x80007FC4, 0x8BC4, 0x00002021, 'hud_font_2'),

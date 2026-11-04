@@ -398,7 +398,7 @@ input::Info Native::info() {
     for (const auto& item : ui_.items)
         info.ui_items.push_back(input::UiItem{double(item.id), double(item.group), item.x0, item.y0, item.x1, item.y1,
             double(item.columns), double(item.buttons), double(item.context), double(item.label),
-            item.selected, item.horizontal, item.activate});
+            item.selected, item.horizontal, item.activate, item.hotkey, item.grid});
     info.minimap_jumps = double(s.minimap_jumps.load()); info.minimap_field = double(s.minimap_field.load());
     info.error = s.error();
     return info;
@@ -501,7 +501,7 @@ bool Native::navigate_minimap(double x, double y, double context, double source_
         && std::isfinite(source_field) && source_field >= 0 && source_field <= double(field)
         && double(field) - source_field <= 12 && cursor_.minimap
         && cursor_.minimap->context == context && cursor_.minimap->contains(x, y)
-        && source_field == double(cursor_.field) && scanout_visible_ && width_ == unsigned(sc64_ws_width) && height_ == 240
+        && source_field <= double(cursor_.field) && scanout_visible_ && width_ == unsigned(sc64_ws_width) && height_ == 240
         && ui_.mode == "game" && pause_policy_.input_active() && s.running && !s.paused;
     if (valid) runtime::minimap_input().submit({x, y, std::uint32_t(context), std::uint64_t(source_field)});
     return valid;
