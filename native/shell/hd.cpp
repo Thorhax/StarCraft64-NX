@@ -647,6 +647,11 @@ std::optional<std::vector<std::uint8_t>> compose(const gfx::DrawList& list, cons
     // pixels left exactly as the canvas are HD, the rest stays as drawn even when dark.
     thread_local std::vector<std::uint8_t> overlay;
     overlay.assign(std::size_t(w) * h, 0);
+    // Translucent layers (message boxes, the minimap, the command panel): the colour
+    // each blends over the pixel (alpha = its weight), 0 where none. The canvas under
+    // it is recovered by undoing the blend, and the HD pixels get the same blend.
+    thread_local std::vector<std::uint32_t> veil;
+    veil.assign(std::size_t(w) * h, 0);
     {
         bool after = false;
         for (const auto& r : list.rectangles) {
@@ -659,17 +664,52 @@ std::optional<std::vector<std::uint8_t>> compose(const gfx::DrawList& list, cons
             const gfx::Texture* source = r.texture != gfx::no_texture ? &list.textures[r.texture] : nullptr;
             const bool texels = source && source->background && r.dsdx == 1024 && r.dtdy == 1024
                                 && source->pixels.size() == std::size_t(source->width) * source->height;
+            // A one-cycle blend drawn by its texels' combined colour: translucent where
+            // its weight is below 255 (the blend formula as the rasterizer applies it).
+            // Unfiltered: a 1:1 copied background samples whole texels.
+            const bool blended = texels && (r.state.other_hi >> 20 & 3) == 0 && !(r.state.other_hi & (1u << 13))
+                                 && (r.state.other_lo & 3) != 3 && (r.state.other_lo & (1u << 14))
+                                 && (r.state.other_lo >> 26 & 3) == 0 && (r.state.other_lo >> 18 & 3) == 0
+                                 && (r.state.other_lo >> 30 & 3) == 0 && (r.state.other_lo >> 22 & 3) == 1;
+            // Combined colours by texel colour (a copied CI background has at most 256),
+            // with the rasterizer's coverage and alpha-compare tests; alpha 0: not drawn.
+            thread_local std::unordered_map<std::uint32_t, std::uint32_t> combined;
+            combined.clear();
+            auto combine = [&](const gfx::Color& texel) {
+                const std::uint32_t key = std::uint32_t(texel.r) | std::uint32_t(texel.g) << 8 | std::uint32_t(texel.b) << 16
+                                          | std::uint32_t(texel.a) << 24;
+                if (auto it = combined.find(key); it != combined.end()) return it->second;
+                std::uint32_t value = 0;
+                try {
+                    const gfx::Color c = gfx::combine_color(texel, r.state);
+                    const bool rejected = ((r.state.other_lo & (1u << 12)) && c.a < 32) || ((r.state.other_lo & 1) && c.a < r.state.blend.a);
+                    if (!rejected && c.a > 0)
+                        value = std::uint32_t(c.r) | std::uint32_t(c.g) << 8 | std::uint32_t(c.b) << 16 | std::uint32_t(std::min(c.a, 255)) << 24;
+                } catch (const std::exception&) {}
+                return combined[key] = value;
+            };
             for (int y = std::max(0, rb.y0); y < std::min(int(h), rb.y1); ++y)
                 for (int x = std::max(0, rb.x0); x < std::min(int(w), rb.x1); ++x) {
+                    const std::size_t at = std::size_t(y) * w + unsigned(x);
                     if (texels) {
                         const int tu = (r.s >> 5) + x - r.x0 / 4, tv = (r.t >> 5) + y - r.y0 / 4;
-                        if (tu < 0 || tv < 0 || tu >= int(source->width) || tv >= int(source->height)
-                            || source->pixels[std::size_t(tv) * source->width + unsigned(tu)].a == 0) continue;
+                        if (tu < 0 || tv < 0 || tu >= int(source->width) || tv >= int(source->height)) continue;
+                        const gfx::Color& texel = source->pixels[std::size_t(tv) * source->width + unsigned(tu)];
+                        if (blended) {
+                            const std::uint32_t c = combine(texel);
+                            if (!c) continue;
+                            if ((c >> 24) < 255 && !overlay[at] && !veil[at]) { veil[at] = c; continue; }
+                        } else if (texel.a == 0) continue;
                     }
-                    overlay[std::size_t(y) * w + unsigned(x)] = 1;
+                    overlay[at] = 1; veil[at] = 0;
                 }
         }
     }
+    // The blender's weights for a veil alpha (render_software: (x * (w >> 3) + y * ((255 - w) >> 3) + 1)) >> 5).
+    auto veil_over = [](std::uint32_t veil_colour, int under, int k) {
+        const int w = int(veil_colour >> 24);
+        return std::clamp((int(veil_colour >> (8 * k) & 255) * (w >> 3) + under * (((255 - w) >> 3) + 1)) >> 5, 0, 255);
+    };
     // Pass 1: each canvas pixel's fog alpha (0..256), or -1 where the RDP drew over
     // the canvas (HUD, cursor) or outside the background.
     thread_local std::vector<std::int16_t> alpha;
@@ -686,11 +726,28 @@ std::optional<std::vector<std::uint8_t>> compose(const gfx::DrawList& list, cons
         const std::uint32_t* drawn = in + std::size_t(y) * w;
         const std::uint8_t* over = overlay.data() + std::size_t(y) * w;
         std::int16_t* ar = alpha.data() + std::size_t(y) * w;
+        const std::uint32_t* vr = veil.data() + std::size_t(y) * w;
         for (int x = xa; x < xb; ++x) {
-            const std::uint32_t pixel = drawn[x] | 0xff000000u, b = palette[row[x]];
-            if (pixel == b) { ar[x] = 0; continue; }
-            if (over[x]) continue;
-            if (pixel == fog_pixel) { ar[x] = 256; continue; }
+            std::uint32_t pixel = drawn[x] | 0xff000000u;
+            const std::uint32_t b = palette[row[x]];
+            int tolerance = 12;
+            if (vr[x]) {
+                // Under a veil: undo its blend (the framebuffer read keeps 5 bits) and
+                // widen the tolerance by the blend's division.
+                const int w = int(vr[x] >> 24), keep = ((255 - w) >> 3) + 1;
+                int under[3];
+                for (int c = 0; c < 3; ++c)
+                    under[c] = std::clamp((int(pixel >> (8 * c) & 255) * 32 + 16 - int(vr[x] >> (8 * c) & 255) * (w >> 3)) / keep, 0, 255);
+                pixel = pack(under[0], under[1], under[2]);
+                tolerance = 12 + 8 * 32 / keep;
+                bool clear = true;
+                for (int c = 0; c < 3; ++c) clear &= std::abs(under[c] - int(b >> (8 * c) & 255)) <= tolerance;
+                if (clear) { ar[x] = 0; continue; }
+            } else {
+                if (pixel == b) { ar[x] = 0; continue; }
+                if (over[x]) continue;
+                if (pixel == fog_pixel) { ar[x] = 256; continue; }
+            }
             // The RDP blends the canvas toward the fog colour (fog of war, the map's
             // edges): solve for that blend; anything else was drawn over the canvas.
             const int bc[3] = {int(b & 255), int(b >> 8 & 255), int(b >> 16 & 255)};
@@ -700,7 +757,7 @@ std::optional<std::vector<std::uint8_t>> compose(const gfx::DrawList& list, cons
             const int span = bc[k] - pc[k];
             const int value = std::abs(span) < 8 ? 256 : std::clamp((bc[k] - fc[k]) * 256 / span, 0, 256);
             bool fits = true;
-            for (int c = 0; c < 3; ++c) fits &= std::abs((bc[c] - fc[c]) * 256 - value * (bc[c] - pc[c])) <= 12 * 256;
+            for (int c = 0; c < 3; ++c) fits &= std::abs((bc[c] - fc[c]) * 256 - value * (bc[c] - pc[c])) <= tolerance * 256;
             if (fits) ar[x] = std::int16_t(value);
         }
     }
@@ -773,6 +830,7 @@ std::optional<std::vector<std::uint8_t>> compose(const gfx::DrawList& list, cons
         }
         const std::uint8_t* h0 = hd_rows.data() + std::ptrdiff_t(s0 - x0) * 2;
         const std::uint8_t* h1 = h0 + fw;
+        const std::uint32_t* vr = veil.data() + std::size_t(y) * w;
         for (unsigned x = 0; x < w; ++x) {
             const std::uint32_t pixel = f[x] | 0xff000000u;
             const int a = s[x];
@@ -781,24 +839,26 @@ std::optional<std::vector<std::uint8_t>> compose(const gfx::DrawList& list, cons
             std::uint32_t* const o[4] = {&o0[2 * x], &o0[2 * x + 1], &o1[2 * x], &o1[2 * x + 1]};
             if (fl[x] && a == 0) { // clear of fog: the HD pixels as they are
                 for (int i = 0; i < 4; ++i) *o[i] = q[i] ? palette[q[i]] : pixel;
-                continue;
-            }
-            if (fl[x] && a == 256) { // deep in the fog
+            } else if (fl[x] && a == 256) { // deep in the fog
                 for (int i = 0; i < 4; ++i) *o[i] = q[i] ? fog_pixel : pixel;
-                continue;
+            } else {
+                auto near = [&](int dx, int dy) { const int n = s[int(x) + dx + dy * int(pw)]; return n < 0 ? a : n; };
+                const int l = near(-1, 0), r = near(1, 0), up = near(0, -1), dn = near(0, 1);
+                for (int i = 0; i < 4; ++i) {
+                    if (!q[i]) { *o[i] = pixel; continue; } // beyond the map: as the N64 drew it
+                    const int dx = (i & 1) ? 1 : -1, dy = (i & 2) ? 1 : -1;
+                    const int sub = (9 * a + 3 * (dx > 0 ? r : l) + 3 * (dy > 0 ? dn : up) + near(dx, dy)) / 16;
+                    const std::uint32_t c = palette[q[i]];
+                    if (sub == 0) { *o[i] = c; continue; }
+                    const int keep = 256 - sub;
+                    *o[i] = pack((int(c & 255) * keep + fog_r * sub) >> 8, (int(c >> 8 & 255) * keep + fog_g * sub) >> 8,
+                                 (int(c >> 16 & 255) * keep + fog_b * sub) >> 8);
+                }
             }
-            auto near = [&](int dx, int dy) { const int n = s[int(x) + dx + dy * int(pw)]; return n < 0 ? a : n; };
-            const int l = near(-1, 0), r = near(1, 0), up = near(0, -1), dn = near(0, 1);
-            for (int i = 0; i < 4; ++i) {
-                if (!q[i]) { *o[i] = pixel; continue; } // beyond the map: as the N64 drew it
-                const int dx = (i & 1) ? 1 : -1, dy = (i & 2) ? 1 : -1;
-                const int sub = (9 * a + 3 * (dx > 0 ? r : l) + 3 * (dy > 0 ? dn : up) + near(dx, dy)) / 16;
-                const std::uint32_t c = palette[q[i]];
-                if (sub == 0) { *o[i] = c; continue; }
-                const int keep = 256 - sub;
-                *o[i] = pack((int(c & 255) * keep + fog_r * sub) >> 8, (int(c >> 8 & 255) * keep + fog_g * sub) >> 8,
-                             (int(c >> 16 & 255) * keep + fog_b * sub) >> 8);
-            }
+            if (vr[x]) // the veil over the HD pixels (the drawn pixel already has it)
+                for (int i = 0; i < 4; ++i)
+                    if (q[i]) *o[i] = pack(veil_over(vr[x], int(*o[i] & 255), 0), veil_over(vr[x], int(*o[i] >> 8 & 255), 1),
+                                           veil_over(vr[x], int(*o[i] >> 16 & 255), 2));
         }
     }
     {

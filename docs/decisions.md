@@ -2056,3 +2056,23 @@ raster 9-12 → 7 ms (repeated keys also hit its texture cache), 33-37 → 40 ta
 per second. The whole menu cycle takes ~100 MiB. `gfx_core_fixtures` runs its
 checkpointed interpretation first, since a repeated identical background is now
 a cache hit without a decode loop.
+
+## ADR-085 — HD under translucent layers (ACCEPTED)
+
+**Context:** HD composition kept the N64 pixels under every rectangle drawn after
+the mission background (ADR-082), so the terrain and units under advisor and
+transmission boxes, the minimap and the command panel stayed at N64 resolution.
+Those layers are translucent copied backgrounds (research.md).
+
+**Decision:** For a 1:1 copied background drawn one-cycle with the plain alpha
+blend, each texel's combined colour (the rasterizer's combiner, coverage and
+alpha tests, memoized per texel colour) is a veil over the pixel. Composition
+undoes the veil to recover the pixel under it (the framebuffer read keeps five
+bits; the fog tolerance widens by the blend's division), estimates fog there as
+elsewhere, and applies the same veil over the four HD pixels. Opaque passes
+(text, borders, portraits) and every other overlay still keep the drawn pixels.
+
+**Consequences:** Boxes, the minimap and the command panel show HD terrain and
+units through them, fog included. Composition costs ~0.7 ms more on the Switch
+(5.7 ms CPU in Wasteland).
+

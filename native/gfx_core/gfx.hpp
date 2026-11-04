@@ -155,6 +155,10 @@ std::vector<SoftwareResult::Write> target_extents(const DrawList& list);
 // target_extents() only.
 void prepare_result_ram(const DrawList& list, std::vector<std::uint8_t>& ram);
 std::vector<Batch> adjacent_batches(const DrawList& list);
+// The one-cycle combiner's colour for a texel, as render_software computes it.
+Color combine_color(Color texel, const State& state);
+// The blender's result for that colour over a framebuffer pixel (5-bit RGB, as read).
+Color blend_color(Color color, Color memory, const State& state);
 std::vector<std::uint8_t> target_rgba(std::span<const std::uint8_t> ram, Image image, unsigned height);
 // Native target comparison, prior to VI filtering; alpha is guest coverage, not
 // ordinary host transparency and is deliberately kept separate from RGB metrics.

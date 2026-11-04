@@ -139,6 +139,8 @@ Color blend(Color color,Color memory,const State& state) {
     return {value(first.r,second.r),value(first.g,second.g),value(first.b,second.b),color.a};
 }
 }
+Color combine_color(Color texel,const State& state) {return combine(texel,state);}
+Color blend_color(Color color,Color memory,const State& state) {return blend(color,memory,state);}
 PixelBounds raster_bounds(const Rectangle& r) {
     return {std::max({0,(r.x0+3)/4,(r.state.scissor.x0+3)/4}),
             std::max({0,(r.y0+3)/4,(r.state.scissor.y0+3)/4}),
