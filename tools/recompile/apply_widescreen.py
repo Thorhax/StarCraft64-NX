@@ -5,10 +5,12 @@ usage: python3 -I tools/recompile/apply_widescreen.py <generated game dir>   (ru
 Replaces the 1P constants that fix the mission view at 320x240 with reads of
 sc64_ws_* variables (native/runtime/widescreen.hpp). With the defaults the code
 behaves exactly as recompiled; the shell sets them before the guest starts.
-  80064674/800646F4  viewport width    (0x8002443C a0)
-  800646BC/8006473C  mode width        (0x80091FA0 a3: frame buffers)
-  800646D8/80064758  canvas width      (0x800243D0 a0: CI8 surface)
-  after 800646D0/80064750  OSViMode copy at s0: width, X scale, field origins
+  80064674  viewport width    (0x8002443C a0)
+  800646BC  mode width        (0x80091FA0 a3: frame buffers)
+  800646D8  canvas width      (0x800243D0 a0: CI8 surface)
+  after 800646D0  OSViMode copy at s0: width, X scale, field origins
+These are the 320x240 setup of 0x80064580 mode 1 (1P missions and the attract
+demo). Its mode 4 (the boot cinematic, 320-wide content) keeps 320x240.
   80024CFC           fog texture width (0x80066B98 a3)
   800246F8           1P cursor X limit (640-unit space)
   80008280           1P command canvas X (0x80066594 a1)
@@ -19,14 +21,13 @@ import re, sys, glob
 from pathlib import Path
 
 EDITS = [  # (vram, original immediate, variable)
-    (0x80064674, '0X140', 'sc64_ws_width'), (0x800646F4, '0X140', 'sc64_ws_width'),
-    (0x800646BC, '0X140', 'sc64_ws_width'), (0x8006473C, '0X140', 'sc64_ws_width'),
-    (0x800646D8, '0X140', 'sc64_ws_width'), (0x80064758, '0X140', 'sc64_ws_width'),
+    (0x80064674, '0X140', 'sc64_ws_width'), (0x800646BC, '0X140', 'sc64_ws_width'),
+    (0x800646D8, '0X140', 'sc64_ws_width'),
     (0x80024CFC, '0X30', 'sc64_ws_fog_width'),
     (0x800246F8, '0X260', 'sc64_ws_cursor_max'),
     (0x80008280, '0XB0', 'sc64_ws_command_x'), (0x80033A38, '0X56', 'sc64_ws_status_x'),
 ]
-VI_CALLS = ('0x800646D0', '0x80064750')
+VI_CALLS = ('0x800646D0',)
 DIALOG = 'RECOMP_FUNC void sc64_resident_8001B8F8(uint8_t* rdram, recomp_context* ctx) {'
 DECL = ('extern int sc64_ws_width, sc64_ws_fog_width, sc64_ws_cursor_max, sc64_ws_command_x, sc64_ws_status_x;\n'
         'void sc64_ws_dialog(unsigned char* rdram, unsigned int dialog);\n')
