@@ -23,12 +23,18 @@ struct Frame {
     std::vector<std::uint8_t> pixels;    // (2 * canvas_width) x (2 * canvas_height), guest word order (index ^ 3)
 };
 using Frames = std::vector<std::shared_ptr<const Frame>>;
+// Canvases finished at a submission, their pixels not copied yet.
+struct Taken { std::shared_ptr<Frame> frame; std::uint32_t pixels = 0; };
 
 // <root> holds arr/, tileset/ and unit/. Missing files or <root>/../nohd keep the N64 graphics.
 void initialize(const std::string& root);
 bool enabled();
 // Guest thread, at each graphics task submission: canvases finished since the last call.
-Frames take(const std::uint8_t* rdram);
+std::vector<Taken> take(const std::uint8_t* rdram);
+// Gfx thread, before the task completes: their pixels and N64 canvas hash. The game
+// redraws a canvas only after the task presenting it completed, and its HD canvas
+// with it, so the copy can wait until then and stays off the guest thread.
+Frames fill(const std::uint8_t* rdram, std::vector<Taken>&& taken);
 // The 2x image of a presented target when it shows an HD canvas. rgba is the target
 // as the RDP left it (width x height); nullopt otherwise.
 std::optional<std::vector<std::uint8_t>> compose(const gfx::DrawList& list, const Frames& frames,

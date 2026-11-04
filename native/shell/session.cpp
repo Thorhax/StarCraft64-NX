@@ -1,5 +1,6 @@
 #include "session.hpp"
 #include "log.hpp"
+#include "platform.hpp"
 #include "audio.hpp"
 #include "clock_bridge.hpp"
 #include "rdp_writeback.hpp"
@@ -17,6 +18,7 @@
 #include <xxHash/xxh3.h>
 #include "../runtime/sha.hpp"
 #include <algorithm>
+#include <cstring>
 #include <deque>
 #include <fstream>
 #include <sstream>
@@ -50,7 +52,7 @@ struct SubmittedTask {
     // Synchronous mode (async_graphics off): already rendered on the guest thread.
     std::shared_ptr<gfx::DrawList> list;
     std::shared_ptr<const RenderedFrame> rendered;
-    hd::Frames hd;
+    std::vector<hd::Taken> hd;
 };
 std::mutex submitted_mutex;
 std::deque<std::unique_ptr<SubmittedTask>> submitted;
@@ -366,11 +368,75 @@ std::shared_ptr<const RenderedFrame> render_task(SubmittedTask& job, std::shared
     ++(gpu ? session().gpu_frames : session().software_frames);
     rendered->software_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
     rendered->software_service_ms = 0;
-    rendered->hd = std::move(job.hd);
+    rendered->hd = hd::fill(job.rdram, std::move(job.hd));
     // RDP stores into live guest RAM, before DP completion is signalled.
     commit_rdp_writes(rendered->pixels, {job.rdram, std::size_t(0x800000)});
     return rendered;
 }
+}
+}
+
+namespace {
+// Big-endian copy of the live RDRAM: rdram keeps host-order 32-bit words, so
+// canonical[i] = rdram[i ^ 3] is one byte swap per word. One core streams about
+// 7 GB/s, so the 8 MiB take ~2.5 ms of the guest thread's frame; a helper thread on
+// another core takes 128 KiB chunks alongside it. The guest returns only when every
+// chunk is copied, and copies them all itself if the helper has not started yet.
+struct SnapshotCopy {
+    std::mutex mutex;
+    std::condition_variable posted, finished;
+    enum class State { idle, posted, running, done } state = State::idle;
+    const std::uint32_t* in = nullptr;
+    std::uint32_t* out = nullptr;
+    std::size_t words = 0;
+    std::atomic<std::size_t> next{0};
+    bool started = false;
+};
+SnapshotCopy snapshot_copy;
+constexpr std::size_t snapshot_chunk = 128 * 1024 / 4; // words
+void copy_snapshot_chunks(SnapshotCopy& s) {
+    for (std::size_t begin; (begin = s.next.fetch_add(snapshot_chunk)) < s.words;) {
+        const std::size_t end = std::min(s.words, begin + snapshot_chunk);
+        for (std::size_t i = begin; i < end; ++i) s.out[i] = __builtin_bswap32(s.in[i]);
+    }
+}
+void snapshot_helper() {
+    sc64_platform_helper_core();
+    auto& s = snapshot_copy;
+    for (;;) {
+        {
+            std::unique_lock lock(s.mutex);
+            s.posted.wait(lock, [&] { return s.state == SnapshotCopy::State::posted; });
+            s.state = SnapshotCopy::State::running;
+        }
+        copy_snapshot_chunks(s);
+        {
+            std::lock_guard lock(s.mutex);
+            s.state = SnapshotCopy::State::done;
+        }
+        s.finished.notify_one();
+    }
+}
+void snapshot_rdram(const std::uint8_t* rdram, std::vector<std::uint8_t>& ram) {
+    auto& s = snapshot_copy;
+    if (!s.started) { // once; without the helper the guest copies alone
+        s.started = true;
+        sc64_platform_thread(snapshot_helper);
+    }
+    {
+        std::lock_guard lock(s.mutex);
+        s.in = reinterpret_cast<const std::uint32_t*>(rdram);
+        s.out = reinterpret_cast<std::uint32_t*>(ram.data());
+        s.words = ram.size() / 4;
+        s.next = 0;
+        s.state = SnapshotCopy::State::posted;
+    }
+    s.posted.notify_one();
+    copy_snapshot_chunks(s);
+    std::unique_lock lock(s.mutex);
+    if (s.state == SnapshotCopy::State::posted) { s.state = SnapshotCopy::State::idle; return; } // helper never began
+    s.finished.wait(lock, [&] { return s.state == SnapshotCopy::State::done; });
+    s.state = SnapshotCopy::State::idle;
 }
 }
 
@@ -393,13 +459,7 @@ extern "C" void sc64_capture_submit(std::uint8_t* rdram, const OSTask* task) {
             if(!snapshot_pool.empty()) { job->ram=std::move(snapshot_pool.back()); snapshot_pool.pop_back(); }
         }
         if(job->ram.size()!=0x800000)job->ram.resize(0x800000); // first use only; later buffers are recycled
-        // Big-endian copy of the live RDRAM: rdram keeps host-order 32-bit words,
-        // so canonical[i] = rdram[i ^ 3] is one byte swap per word.
-        {
-            const auto* words = reinterpret_cast<const std::uint32_t*>(rdram);
-            auto* out = reinterpret_cast<std::uint32_t*>(job->ram.data());
-            for (std::size_t i = 0; i < job->ram.size() / 4; ++i) out[i] = __builtin_bswap32(words[i]);
-        }
+        snapshot_rdram(rdram,job->ram);
         job->rdram=rdram;
         job->ucode=t.ucode;
         job->data_ptr=t.data_ptr;
@@ -407,6 +467,11 @@ extern "C" void sc64_capture_submit(std::uint8_t* rdram, const OSTask* task) {
         job->hd=sc64::hd::take(rdram);
         session().capture_snapshot_ms=std::chrono::duration<double,std::milli>(
             std::chrono::steady_clock::now()-snapshot_start).count();
+        { // the snapshot is on the guest thread's critical path: its mean, every 1800 tasks
+            static double total=0; static unsigned count=0;
+            total+=session().capture_snapshot_ms; if(++count==1800) {
+                sc64::shell::log::info("snapshot ms/task: %.2f", total/count); total=0; count=0; }
+        }
         if(!session().async_graphics) {
             // Synchronous (Android/desktop): render here, servicing higher guest
             // priorities every millisecond; the Gfx thread only publishes.

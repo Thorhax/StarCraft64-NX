@@ -27,3 +27,6 @@ bool sc64_platform_thread(void (*entry)());
 // core 0, which it shares with the graphics thread, for the duration. No-op elsewhere.
 void sc64_platform_heavy_begin();
 void sc64_platform_heavy_end();
+// Called by a helper the guest thread waits on (the snapshot copy): on Switch, core 0
+// below the shell and graphics threads (idle time only). No-op elsewhere.
+void sc64_platform_helper_core();

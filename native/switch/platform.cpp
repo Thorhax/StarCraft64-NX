@@ -54,3 +54,9 @@ void sc64_platform_heavy_begin() {
     else svcSetThreadCoreMask(CUR_THREAD_HANDLE, 3, 1u << 3);
 }
 void sc64_platform_heavy_end() { svcSetThreadCoreMask(CUR_THREAD_HANDLE, 0, 1u << 0); }
+// Below the shell (0x2C) and graphics (0x2D) threads: it uses core 0's idle time only,
+// so presentation keeps its pace; the guest copies whatever the helper has not taken.
+void sc64_platform_helper_core() {
+    svcSetThreadCoreMask(CUR_THREAD_HANDLE, 0, 1u << 0);
+    svcSetThreadPriority(CUR_THREAD_HANDLE, 0x2E);
+}

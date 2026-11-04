@@ -31,6 +31,11 @@ constexpr std::uint32_t creep_edges = 0x800EEE78, creep_edges_width = 0x800EEE7C
 constexpr std::uint32_t mission_palette = 0x800A5F30;                // RGBA16, the tileset's palette
 constexpr std::uint32_t render_canvas = 0x800AFD60;                  // canvas the render functions draw to
 constexpr std::uint32_t hp_bar = 0x80029CC0;                         // render function of health bars (11, 18)
+// The common render functions, drawn natively (normal: player colours through the
+// remap table; shadow: darkened through the shadow table), each with its flipped twin.
+constexpr std::uint32_t render_normal = 0x80048238, render_normal_flipped = 0x80049A10;
+constexpr std::uint32_t render_shadow = 0x80048F7C, render_shadow_flipped = 0x80049D84;
+constexpr std::uint32_t remap_table = 0x800B1784, shadow_table = 0x800AFA44; // shadow: [word] + 0x1200
 // Fog of war (and the dark beyond the map) blends the canvas toward this colour.
 constexpr int fog_r = 16, fog_g = 0, fog_b = 16;
 constexpr const char* tilesets[8] = {"badlands", "platform", "install", "ashworld", "jungle", "desert", "ice", "twilight"};
@@ -430,8 +435,12 @@ constexpr std::uint32_t scratch_size = 256 * 1024;
 std::uint64_t images_drawn = 0, frames_taken = 0;
 // Time spent per part, logged every 1800 frames taken.
 using Clock = std::chrono::steady_clock;
-double terrain_ms = 0, image_ms = 0, take_ms = 0, compose_ms = 0;
+double terrain_ms = 0, image_ms = 0, take_ms = 0, fill_ms = 0, compose_ms = 0;
 std::uint64_t composed = 0, fallbacks = 0;
+// hdverify (next to the hd folder): every native image is also drawn by the game's
+// function and the two compared; differences are logged.
+bool verify = false;
+std::uint64_t verified = 0, verify_mismatches = 0, verified_flipped = 0, verified_shadow = 0, verified_clipped = 0;
 double since(Clock::time_point start) { return std::chrono::duration<double, std::milli>(Clock::now() - start).count(); }
 
 std::uint32_t guest_alloc(std::uint8_t* rdram, std::size_t size) {
@@ -545,13 +554,15 @@ void initialize(const std::string& directory) {
         sc64::shell::log::info("hd: no PC graphics in %s, N64 graphics kept", directory.c_str());
         return;
     }
+    verify = std::filesystem::exists(parent / "hdverify", error);
+    if (verify) sc64::shell::log::info("hd: hdverify, native images compared with the game's render functions");
     if (!sc64_platform_thread(load)) sc64::shell::log::warning("hd: loader thread failed, N64 graphics kept");
 }
 
 bool enabled() { return ready.load(); }
 
-Frames take(const std::uint8_t* rdram) {
-    Frames out;
+std::vector<Taken> take(const std::uint8_t*) {
+    std::vector<Taken> out;
     if (!ready.load()) return out;
     std::lock_guard lock(mutex);
     const auto started = Clock::now();
@@ -560,22 +571,36 @@ Frames take(const std::uint8_t* rdram) {
         c.dirty = false;
         auto frame = std::make_shared<Frame>();
         frame->canvas = address; frame->canvas_width = c.width; frame->canvas_height = c.height;
-        const std::size_t n = std::size_t(c.width) * c.height * 4;
-        frame->pixels.resize(n);
-        std::memcpy(frame->pixels.data(), rdram + offset(c.pixels), n); // guest word order
-        std::uint64_t hash = 14695981039346656037ull;
-        for (std::uint32_t i = 0; i < c.width * c.height; i += 4) hash = mix(hash, gw(rdram, 0x80000000u + address + i));
-        frame->canvas_hash = hash;
-        ++frames_taken;
-        out.push_back(std::move(frame));
+        out.push_back({std::move(frame), c.pixels});
     }
     if (current && !current->dirty) current = nullptr; // images after the submission are not taken
     take_ms += since(started);
-    if (!out.empty() && frames_taken % 1800 == 0)
-        sc64::shell::log::info("hd ms/frame: terrain %.2f images %.2f take %.2f compose %.2f (%.2f per image, %llu) | %.1f images per frame, %llu N64 fallbacks",
-            terrain_ms / 1800, image_ms / 1800, take_ms / 1800, compose_ms / 1800, composed ? compose_ms / double(composed) : 0.0,
-            (unsigned long long)composed, double(images_drawn) / 1800, (unsigned long long)fallbacks),
-        terrain_ms = image_ms = take_ms = compose_ms = 0, images_drawn = 0, composed = 0;
+    return out;
+}
+
+Frames fill(const std::uint8_t* rdram, std::vector<Taken>&& taken) {
+    Frames out;
+    if (taken.empty()) return out;
+    const auto started = Clock::now();
+    for (auto& [frame, pixels] : taken) {
+        const std::size_t n = std::size_t(frame->canvas_width) * frame->canvas_height * 4;
+        frame->pixels.resize(n);
+        std::memcpy(frame->pixels.data(), rdram + offset(pixels), n); // guest word order
+        std::uint64_t hash = 14695981039346656037ull;
+        for (std::uint32_t i = 0; i < frame->canvas_width * frame->canvas_height; i += 4)
+            hash = mix(hash, gw(rdram, 0x80000000u + frame->canvas + i));
+        frame->canvas_hash = hash;
+        out.push_back(std::move(frame));
+    }
+    std::lock_guard lock(mutex);
+    fill_ms += since(started);
+    frames_taken += out.size();
+    if (frames_taken % 1800 < out.size())
+        sc64::shell::log::info("hd ms/frame: terrain %.2f images %.2f take %.2f fill %.2f compose %.2f (%.2f per image, %llu) | %.1f images per frame, %llu N64 fallbacks",
+            terrain_ms / 1800, image_ms / 1800, take_ms / 1800, fill_ms / 1800, compose_ms / 1800,
+            composed ? compose_ms / double(composed) : 0.0, (unsigned long long)composed, double(images_drawn) / 1800,
+            (unsigned long long)fallbacks),
+        terrain_ms = image_ms = take_ms = fill_ms = compose_ms = 0, images_drawn = 0, composed = 0;
     return out;
 }
 
@@ -757,8 +782,11 @@ std::optional<std::vector<std::uint8_t>> compose(const gfx::DrawList& list, cons
             }
         }
     }
-    compose_ms += since(started);
-    ++composed;
+    {
+        std::lock_guard lock(mutex);
+        compose_ms += since(started);
+        ++composed;
+    }
     return bytes;
 }
 }
@@ -880,6 +908,36 @@ extern "C" void sc64_hd_terrain(std::uint8_t* rdram, recomp_context*) {
     current_canvas = canvas;
 }
 
+namespace {
+// A PC frame through one of the common render functions, as the game draws it:
+// the clip rectangle (rx, ry, rw, rh) of the frame (columns counted from the screen
+// left when flipped) at canvas position (x, y). pixel(col, row) is that canvas byte.
+template <class Pixel>
+void draw_native(const Grp& grp, const GrpFrame& f, bool flipped, bool shadow, const std::uint8_t* table,
+                 int rx, int ry, int rw, int rh, Pixel&& pixel) {
+    const auto& d = grp.data;
+    for (int row = 0; row < rh; ++row) {
+        const unsigned line = unsigned(ry + row);
+        std::size_t p = f.offset + (d[f.offset + line * 2] | d[f.offset + line * 2 + 1] << 8);
+        for (int lx = 0; lx < int(f.w) && p < d.size();) {
+            const unsigned c = d[p++];
+            int run = int(c & 0x7f);
+            if (c & 0x80) { lx += run; continue; }
+            const bool fill = c & 0x40;
+            if (fill) run = int(c & 0x3f);
+            for (int k = 0; k < run; ++k) {
+                const int fx = lx + k, col = (flipped ? int(f.w) - 1 - fx : fx) - rx;
+                if (col < 0 || col >= rw) continue;
+                std::uint8_t& out = pixel(col, row);
+                out = table[shadow ? out : (fill ? d[p] : d[p + std::size_t(k)])];
+            }
+            p += fill ? 1 : std::size_t(run);
+            lx += run;
+        }
+    }
+}
+}
+
 // drawImage (0x8012011C) about to call the image's render function (s0 = image,
 // v0 = function): the same function draws the image's PC frame at 2x.
 extern "C" void sc64_hd_image(std::uint8_t* rdram, recomp_context* ctx) {
@@ -918,6 +976,31 @@ extern "C" void sc64_hd_image(std::uint8_t* rdram, recomp_context* ctx) {
     const int rw = std::min(int(f.w), cw - x) - rx, rh = std::min(int(f.h), ch - y) - ry;
     if (rw <= 0 || rh <= 0) return;
     const auto started = Clock::now();
+    const bool normal = render == render_normal || render == render_normal_flipped;
+    const bool shadow = render == render_shadow || render == render_shadow_flipped;
+    std::vector<std::uint8_t> expected;
+    if (normal || shadow) {
+        std::array<std::uint8_t, 256> table;
+        const std::uint32_t source = shadow ? gw(rdram, shadow_table) + 0x1200 : remap_table;
+        for (unsigned i = 0; i < 256; ++i) table[i] = gb(rdram, source + i);
+        const bool mirrored = render == render_normal_flipped || render == render_shadow_flipped;
+        const std::uint32_t base = c.pixels + std::uint32_t((y + ry) * cw + x + rx);
+        if (verify) {
+            expected.resize(std::size_t(rw) * rh);
+            for (int row = 0; row < rh; ++row)
+                for (int col = 0; col < rw; ++col)
+                    expected[std::size_t(row) * rw + col] = gb(rdram, base + std::uint32_t(row * cw + col));
+            draw_native(*grp, f, mirrored, shadow, table.data(), rx, ry, rw, rh,
+                        [&](int col, int row) -> std::uint8_t& { return expected[std::size_t(row) * rw + col]; });
+        } else {
+            draw_native(*grp, f, mirrored, shadow, table.data(), rx, ry, rw, rh, [&](int col, int row) -> std::uint8_t& {
+                return rdram[offset((base + std::uint32_t(row * cw + col)) ^ 3)];
+            });
+            ++images_drawn;
+            image_ms += since(started);
+            return;
+        }
+    }
     // The PC frame in the game's own layout: header, then its line table and lines.
     sw(rdram, scratch, std::uint32_t(f.x) << 24 | std::uint32_t(f.y) << 16 | std::uint32_t(f.w) << 8 | f.h);
     sw(rdram, scratch + 4, scratch + 8);
@@ -930,6 +1013,25 @@ extern "C" void sc64_hd_image(std::uint8_t* rdram, recomp_context* ctx) {
     sh(rdram, rect, std::uint16_t(rx)); sh(rdram, rect + 2, std::uint16_t(ry));
     sh(rdram, rect + 4, std::uint16_t(rw)); sh(rdram, rect + 6, std::uint16_t(rh));
     call_render(rdram, ctx, c, render, x + rx, y + ry, scratch, gw(rdram, image + 0x2C));
+    if (!expected.empty()) {
+        std::uint64_t different = 0;
+        for (int row = 0; row < rh; ++row)
+            for (int col = 0; col < rw; ++col)
+                different += gb(rdram, c.pixels + std::uint32_t((y + ry + row) * cw + x + rx + col))
+                             != expected[std::size_t(row) * rw + col];
+        ++verified;
+        verified_flipped += render == render_normal_flipped || render == render_shadow_flipped;
+        verified_shadow += shadow;
+        verified_clipped += rx || ry || rw != int(f.w) || rh != int(f.h);
+        if (different && verify_mismatches++ < 20)
+            sc64::shell::log::warning("hdverify: render %08x image %u frame %u rect %d,%d %dx%d: %llu pixels differ",
+                                      render, id, frame_index, rx, ry, rw, rh, (unsigned long long)different);
+        if (verified % 5000 == 0)
+            sc64::shell::log::info("hdverify: %llu images (%llu flipped, %llu shadows, %llu clipped), %llu with differences",
+                                   (unsigned long long)verified, (unsigned long long)verified_flipped,
+                                   (unsigned long long)verified_shadow, (unsigned long long)verified_clipped,
+                                   (unsigned long long)verify_mismatches);
+    }
     ++images_drawn;
     image_ms += since(started);
 }

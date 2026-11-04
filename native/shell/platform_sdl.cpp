@@ -166,3 +166,4 @@ bool sc64_platform_thread(void (*entry)()) {
 }
 void sc64_platform_heavy_begin() {}
 void sc64_platform_heavy_end() {}
+void sc64_platform_helper_core() {}

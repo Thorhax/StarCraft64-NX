@@ -1993,3 +1993,32 @@ missions run at 60 graphics tasks per second in 4:3 and in widescreen
 (measured in Wasteland and the attract demo on a 3-core launch; 56-60 frames
 presented). Split-screen, menus and briefings keep the N64 graphics. Frames
 whose canvas does not match the HD frame fall back to the N64 image.
+
+## ADR-083 — Every finished frame reaches VI selection; the snapshot copy is shared (ACCEPTED)
+
+**Context:** With HD missions near 60 tasks per second on the Switch, the
+mailbox (latest packet only) lost up to 16 frames per second: the guest's VI
+(59.94 Hz) and the display (60 Hz) drift, so two packets often finished within
+one display refresh and the earlier was replaced unseen. VI selection then fell
+back to an older image of the same framebuffer, briefly stepping back. The guest
+thread also spent ~2.5 ms per task copying the 8 MiB RDRAM snapshot, at the
+bandwidth of one core.
+
+**Decision:** `FrameMailbox::take` returns every packet published since the
+previous call, oldest first (still three slots; the oldest is replaced only
+when the consumer is three behind), and `Native::tick` adds each to VI
+selection. This refines ADR-005: no complete presentation is superseded before
+the consumer has seen it. The snapshot copy is split into 128 KiB chunks taken
+by the guest thread and a helper thread (on the Switch: core 0, below the shell
+and graphics threads, so it only uses idle time); the guest returns when every
+chunk is copied and copies all of them itself if the helper has not started.
+The HD canvas copy moves from submission to the Gfx thread before the task
+completes (the game redraws a canvas only after the task presenting it
+completed), and the two common image renderers are drawn natively (pixel-exact
+against the game's functions under `hdverify`).
+
+**Consequences:** Zerg base on a 3-core Switch launch: snapshot 2.7 → 1.5 ms per
+task, 59.5 tasks and 59.5 mailbox frames per second (was 55-57 and as low as 43),
+57 distinct images per second shown. A copy that only rewrites changed lines was
+measured slower on the Switch (3.0 ms: two read streams) and `-O3` for the
+generated code gave no measurable change; both were dropped.
