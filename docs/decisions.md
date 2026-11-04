@@ -2242,3 +2242,18 @@ scale time 3.26-3.36 -> 2.36 ms (Zerg base, repeated), 2.37 ms in the main
 menu. Of the rest about 1.1 ms is libnx's cache flush of the 3.7 MB
 framebuffer in `framebufferEnd`, required while presentation stays on the
 CPU framebuffer (switch-gpu-renderer.md).
+
+**2. Terrain while scrolling (kept).** The scrolling dip comes from the game
+thread (earlier runs showed every produced frame presented), where the HD
+terrain hook redrew the whole 832x480 canvas on each camera step (0.43 ms per
+redraw on the desktop, about a third of the frames while scrolling).
+`draw_terrain` now keeps a signature per visible tile; when the camera moves by
+whole 4-pixel groups and every tile in both views is unchanged, the canvas is
+shifted and only the exposed strips are drawn. Creep edge sprites overlap their
+neighbours, so the areas under the edges of tiles entering or leaving the view
+are redrawn with every visible edge in tile order, exactly as a full redraw.
+`hdverify` compares each shifted canvas with a full redraw: 900 shifts in
+Wasteland and 600 on the Zerg base (creep) were identical. Desktop terrain
+time while scrolling 0.16 -> 0.06 ms per frame (the remainder is the per-frame
+copy into the guest canvas). The HD composition (about 4 ms desktop, 5.6 ms CPU
+on the Switch) runs on its worker and does not hold the game thread.

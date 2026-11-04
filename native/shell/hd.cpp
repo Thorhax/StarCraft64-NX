@@ -406,8 +406,9 @@ const std::uint8_t* creep_megatile(unsigned id) {
 }
 // The creep edge frame on a tile beside creep (game tile flag 0x8000; 0x8000A10C draws
 // the same frame of the game's own edge graphic), its pixels over the terrain bytes:
-// w x h, (x0, y0) the tile's top left, guest byte order.
-void draw_creep_edge(std::uint8_t* bytes, unsigned w, unsigned h, int x0, int y0, unsigned frame) {
+// w x h, (x0, y0) the tile's top left, guest byte order; only pixels inside the clip rectangle.
+void draw_creep_edge(std::uint8_t* bytes, unsigned w, unsigned h, int x0, int y0, unsigned frame,
+                     int clip_x0, int clip_x1, int clip_y0, int clip_y1) {
     const auto& grp = tileset_data[map.era].creep;
     if (!grp || frame >= grp->frames.size() || !grp->frames[frame].size) return;
     const GrpFrame& f = grp->frames[frame];
@@ -425,7 +426,9 @@ void draw_creep_edge(std::uint8_t* bytes, unsigned w, unsigned h, int x0, int y0
             for (unsigned k = 0; k < run && p < d.size(); ++k) {
                 const int x = left + int(lx + k);
                 const std::uint8_t v = fill ? d[p] : d[p + k];
-                if (y >= 0 && y < int(h) && x >= 0 && x < int(w)) bytes[(std::size_t(y) * w + unsigned(x)) ^ 3] = v;
+                if (y >= std::max(0, clip_y0) && y < std::min(int(h), clip_y1) && x >= std::max(0, clip_x0)
+                    && x < std::min(int(w), clip_x1))
+                    bytes[(std::size_t(y) * w + unsigned(x)) ^ 3] = v;
             }
             p += fill ? 1 : run;
             lx += run;
@@ -454,6 +457,7 @@ std::uint64_t composed = 0, fallbacks = 0;
 // hdverify (next to the hd folder): every native image is also drawn by the game's
 // function and the two compared; differences are logged.
 bool verify = false;
+std::uint64_t shifts_verified = 0;
 std::uint64_t verified = 0, verify_mismatches = 0, verified_flipped = 0, verified_shadow = 0, verified_clipped = 0;
 double since(Clock::time_point start) { return std::chrono::duration<double, std::milli>(Clock::now() - start).count(); }
 
@@ -483,75 +487,166 @@ void call_render(std::uint8_t* rdram, const recomp_context* ctx, const Canvas& c
 // Index 0 marks pixels without a PC equivalent (beyond the map, minitiles not
 // matched yet); presentation keeps the N64 pixels there. Rows are assembled in guest
 // byte order (each 4-byte group reversed, as RDRAM holds them).
-// The last terrain drawn, reused while the camera and the visible tiles stand still.
-struct TerrainCache { int cam_x = 0, cam_y = 0, vx = 0, vy = 0; unsigned w = 0, h = 0; std::uint64_t tiles = 0;
-                      std::uint32_t game_tiles = 0; std::vector<std::uint8_t> bytes; };
+// The last terrain drawn. Reused as it is while the camera and the visible tiles stand
+// still; when the camera moves by whole 4-pixel groups and every tile still in view is
+// unchanged, shifted, with only the newly exposed strips drawn (ADR-092).
+struct TerrainCache { int cam_x = 0, cam_y = 0, vx = 0, vy = 0; unsigned w = 0, h = 0; bool valid = false;
+                      std::uint32_t game_tiles = 0; int tx0 = 0, ty0 = 0, tx1 = 0, ty1 = 0;
+                      std::vector<std::uint64_t> tiles; // per visible tile: game tile, live creep tile, creep edge
+                      std::vector<std::uint8_t> bytes; };
 TerrainCache terrain_cache;
+struct TerrainView {
+    const std::uint8_t* rdram; unsigned w, h; int cam_x, cam_y, vx, vy;
+    bool creep; std::uint32_t live, edges, megas;
+};
+// Terrain pixels for x in [x0, x1) and y in [y0, y1) (x0, x1 multiples of 4), straight
+// into the canvas bytes. False when a minitile is not matched yet.
+bool draw_region(const TerrainView& v, std::uint8_t* bytes, unsigned x0, unsigned x1, unsigned y0, unsigned y1) {
+    bool complete = true;
+    for (unsigned y = y0; y < y1; ++y) {
+        std::uint8_t* row = bytes + std::size_t(y) * v.w;
+        std::memset(row + x0, 0, x1 - x0);
+        const int my = v.cam_y + int(y) - 2 * v.vy;
+        if (my < 0 || my >= int(map.height) * 32) continue;
+        const unsigned ty = unsigned(my) / 32, py = unsigned(my) % 32;
+        const int left = std::max({0, 2 * v.vx - v.cam_x, int(x0)});
+        const int right = std::min({int(v.w), int(map.width) * 32 + 2 * v.vx - v.cam_x, int(x1)});
+        for (int x = left; x < right;) {
+            const unsigned mx = unsigned(v.cam_x + x - 2 * v.vx), tx = mx / 32, px = mx % 32;
+            const unsigned n = gh(v.rdram, map.game_tiles + (ty * map.width + tx) * 2) & 0x7fff;
+            const unsigned run = std::min(32 - px, unsigned(right - x));
+            bool whole = true;
+            const std::uint8_t* block = v.creep ? creep_megatile(gh(v.rdram, v.live + (ty * map.width + tx) * 2)) : nullptr;
+            if (!block) block = n < v.megas ? megatile(v.rdram, n, whole) : nullptr;
+            complete &= whole;
+            if (block) {
+                const std::uint8_t* src = block + py * 32 + px;
+                if ((x & 3) == 0 && (px & 3) == 0 && (run & 3) == 0) {
+                    for (unsigned k = 0; k < run; k += 4) {
+                        row[unsigned(x) + k] = src[k + 3]; row[unsigned(x) + k + 1] = src[k + 2];
+                        row[unsigned(x) + k + 2] = src[k + 1]; row[unsigned(x) + k + 3] = src[k];
+                    }
+                } else
+                    for (unsigned k = 0; k < run; ++k) row[(unsigned(x) + k) ^ 3] = src[k];
+            }
+            x += int(run);
+        }
+    }
+    return complete;
+}
+// The creep edges of the visible tiles, in tile order, clipped to [x0, x1) x [y0, y1).
+void draw_edges(const TerrainView& v, std::uint8_t* bytes, int tx0, int ty0, int tx1, int ty1,
+                int x0, int x1, int y0, int y1) {
+    const auto& grp = tileset_data[map.era].creep;
+    const int reach = grp ? int(std::max(grp->width, grp->height)) : 0;
+    for (int ty = ty0; ty < ty1; ++ty)
+        for (int tx = tx0; tx < tx1; ++tx) {
+            const std::uint32_t pos = std::uint32_t(ty * int(map.width) + tx);
+            const unsigned edge = gb(v.rdram, v.edges + pos);
+            if (!edge || !(gh(v.rdram, map.game_tiles + pos * 2) & 0x8000)) continue;
+            const int px = tx * 32 - v.cam_x + 2 * v.vx, py = ty * 32 - v.cam_y + 2 * v.vy;
+            if (px + 16 + reach <= x0 || px + 16 - reach >= x1 || py + 16 + reach <= y0 || py + 16 - reach >= y1) continue;
+            draw_creep_edge(bytes, v.w, v.h, px, py, edge - 1, x0, x1, y0, y1);
+        }
+}
 void draw_terrain(std::uint8_t* rdram, const Canvas& c, int cam_x, int cam_y, int vx, int vy) {
     const unsigned w = c.width * 2, h = c.height * 2;
-    // The visible tiles' identity, so creep spreading redraws the terrain.
     const int tx0 = std::max(0, (cam_x - 2 * vx) / 32), ty0 = std::max(0, (cam_y - 2 * vy) / 32);
     const int tx1 = std::min(int(map.width), (cam_x - 2 * vx + int(w)) / 32 + 1);
     const int ty1 = std::min(int(map.height), (cam_y - 2 * vy + int(h)) / 32 + 1);
     const std::uint32_t live = gw(rdram, live_tiles), edges = gw(rdram, creep_edges);
     const bool creep = (live >> 24) == 0x80 && (edges >> 24) == 0x80 && gw(rdram, creep_edges_width) == map.width;
-    std::uint64_t hash = 14695981039346656037ull;
+    const TerrainView view{rdram, w, h, cam_x, cam_y, vx, vy, creep, live, edges, (map.minis - map.megas) / 32};
+    // The visible tiles' identity, so creep spreading redraws the terrain.
+    thread_local std::vector<std::uint64_t> tiles;
+    tiles.clear();
     for (int ty = ty0; ty < ty1; ++ty)
         for (int tx = tx0; tx < tx1; ++tx) {
             const std::uint32_t pos = std::uint32_t(ty * int(map.width) + tx);
-            hash = mix(hash, gh(rdram, map.game_tiles + pos * 2));
-            if (creep) hash = mix(hash, std::uint32_t(gh(rdram, live + pos * 2)) << 8 | gb(rdram, edges + pos));
+            std::uint64_t id = gh(rdram, map.game_tiles + pos * 2);
+            if (creep) id |= std::uint64_t(gh(rdram, live + pos * 2)) << 16 | std::uint64_t(gb(rdram, edges + pos)) << 32;
+            tiles.push_back(id);
         }
     TerrainCache& cache = terrain_cache;
-    if (cache.cam_x == cam_x && cache.cam_y == cam_y && cache.vx == vx && cache.vy == vy && cache.w == w && cache.h == h
-        && cache.tiles == hash && cache.game_tiles == map.game_tiles && cache.bytes.size() == std::size_t(w) * h) {
+    const bool same_view = cache.valid && cache.vx == vx && cache.vy == vy && cache.w == w && cache.h == h
+                           && cache.game_tiles == map.game_tiles && cache.bytes.size() == std::size_t(w) * h;
+    if (same_view && cache.cam_x == cam_x && cache.cam_y == cam_y && cache.tiles == tiles) {
         std::memcpy(rdram + offset(c.pixels), cache.bytes.data(), cache.bytes.size());
         return;
     }
-    cache = {cam_x, cam_y, vx, vy, w, h, hash, map.game_tiles, std::move(cache.bytes)};
-    cache.bytes.resize(std::size_t(w) * h);
+    const int dx = cam_x - cache.cam_x, dy = cam_y - cache.cam_y;
+    bool shift = same_view && (dx & 3) == 0 && std::abs(dx) < int(w) && std::abs(dy) < int(h);
+    // Every tile in both views unchanged. Creep edges overlap their neighbours, so the
+    // sprites of edge tiles entering or leaving the view are redrawn below with all
+    // edges under them in tile order, as a full redraw draws them.
+    struct Area { int x0, x1, y0, y1; };
+    thread_local std::vector<Area> areas;
+    areas.clear();
+    const auto& edge_grp = tileset_data[map.era].creep;
+    auto edge_area = [&](int tx, int ty, std::uint64_t id) {
+        if (!(id >> 32) || !(id & 0x8000) || !edge_grp) return;
+        const int cx = tx * 32 - cam_x + 2 * vx + 16, cy = ty * 32 - cam_y + 2 * vy + 16;
+        const int half_w = int(edge_grp->width) / 2 + 1, half_h = int(edge_grp->height) / 2 + 1;
+        const Area a{std::max(0, (cx - half_w) & ~3), std::min(int(w), (cx + half_w + 3) & ~3),
+                     std::max(0, cy - half_h), std::min(int(h), cy + half_h)};
+        if (a.x0 < a.x1 && a.y0 < a.y1) areas.push_back(a);
+    };
+    for (int ty = ty0; shift && ty < ty1; ++ty)
+        for (int tx = tx0; shift && tx < tx1; ++tx) {
+            const std::uint64_t id = tiles[std::size_t(ty - ty0) * unsigned(tx1 - tx0) + unsigned(tx - tx0)];
+            if (tx >= cache.tx0 && tx < cache.tx1 && ty >= cache.ty0 && ty < cache.ty1)
+                shift = cache.tiles[std::size_t(ty - cache.ty0) * unsigned(cache.tx1 - cache.tx0) + unsigned(tx - cache.tx0)] == id;
+            else edge_area(tx, ty, id);
+        }
+    for (int ty = cache.ty0; shift && ty < cache.ty1; ++ty)
+        for (int tx = cache.tx0; tx < cache.tx1; ++tx)
+            if (tx < tx0 || tx >= tx1 || ty < ty0 || ty >= ty1)
+                edge_area(tx, ty, cache.tiles[std::size_t(ty - cache.ty0) * unsigned(cache.tx1 - cache.tx0) + unsigned(tx - cache.tx0)]);
     match_budget = 4; // full content matches per redraw (a few hundred microseconds each)
     bool complete = true;
-    const std::uint32_t megas = (map.minis - map.megas) / 32;
-    std::vector<std::uint8_t> row(w + 4);
-    for (unsigned y = 0; y < h; ++y) {
-        const int my = cam_y + int(y) - 2 * vy;
-        std::fill(row.begin(), row.end(), 0);
-        if (my >= 0 && my < int(map.height) * 32) {
-            const unsigned ty = unsigned(my) / 32, py = unsigned(my) % 32;
-            const int left = std::max(0, 2 * vx - cam_x), right = std::min(int(w), int(map.width) * 32 + 2 * vx - cam_x);
-            for (int x = left; x < right;) {
-                const unsigned mx = unsigned(cam_x + x - 2 * vx), tx = mx / 32, px = mx % 32;
-                const unsigned n = gh(rdram, map.game_tiles + (ty * map.width + tx) * 2) & 0x7fff;
-                const unsigned run = std::min(32 - px, unsigned(right - x));
-                bool whole = true;
-                const std::uint8_t* block = creep ? creep_megatile(gh(rdram, live + (ty * map.width + tx) * 2)) : nullptr;
-                if (!block) block = n < megas ? megatile(rdram, n, whole) : nullptr;
-                complete &= whole;
-                if (block) {
-                    const std::uint8_t* src = block + py * 32 + px;
-                    if ((x & 3) == 0 && (px & 3) == 0 && (run & 3) == 0) {
-                        for (unsigned k = 0; k < run; k += 4) {
-                            row[unsigned(x) + k] = src[k + 3]; row[unsigned(x) + k + 1] = src[k + 2];
-                            row[unsigned(x) + k + 2] = src[k + 1]; row[unsigned(x) + k + 3] = src[k];
-                        }
-                    } else
-                        for (unsigned k = 0; k < run; ++k) row[(unsigned(x) + k) ^ 3] = src[k];
-                }
-                x += int(run);
-            }
-        }
-        std::memcpy(cache.bytes.data() + std::size_t(y) * w, row.data(), w);
+    if (shift) {
+        // Content moves by (-dx, -dy) in the canvas; rows keep their 4-byte groups.
+        const int kx0 = std::max(0, -dx), kx1 = std::min(int(w), int(w) - dx); // kept columns in the new view
+        const int ky0 = std::max(0, -dy), ky1 = std::min(int(h), int(h) - dy);
+        if (dy <= 0)
+            for (int y = ky1 - 1; y >= ky0; --y)
+                std::memmove(cache.bytes.data() + std::size_t(y) * w + kx0, cache.bytes.data() + std::size_t(y + dy) * w + kx0 + dx,
+                             std::size_t(kx1 - kx0));
+        else
+            for (int y = ky0; y < ky1; ++y)
+                std::memmove(cache.bytes.data() + std::size_t(y) * w + kx0, cache.bytes.data() + std::size_t(y + dy) * w + kx0 + dx,
+                             std::size_t(kx1 - kx0));
+        // Exposed: rows outside [ky0, ky1) in full, columns outside [kx0, kx1) within them.
+        struct Strip { int x0, x1, y0, y1; };
+        Strip strips[3]; unsigned count = 0;
+        if (ky0 > 0) strips[count++] = {0, int(w), 0, ky0};
+        if (ky1 < int(h)) strips[count++] = {0, int(w), ky1, int(h)};
+        if (kx0 > 0) strips[count++] = {0, kx0, ky0, ky1};
+        else if (kx1 < int(w)) strips[count++] = {kx1, int(w), ky0, ky1};
+        for (unsigned i = 0; i < count; ++i) areas.push_back({strips[i].x0, strips[i].x1, strips[i].y0, strips[i].y1});
+        for (const auto& a : areas)
+            complete &= draw_region(view, cache.bytes.data(), unsigned(a.x0), unsigned(a.x1), unsigned(a.y0), unsigned(a.y1));
+        if (creep)
+            for (const auto& a : areas) draw_edges(view, cache.bytes.data(), tx0, ty0, tx1, ty1, a.x0, a.x1, a.y0, a.y1);
+    } else {
+        cache.bytes.resize(std::size_t(w) * h);
+        complete = draw_region(view, cache.bytes.data(), 0, w, 0, h);
+        if (creep) draw_edges(view, cache.bytes.data(), tx0, ty0, tx1, ty1, 0, int(w), 0, int(h));
     }
-    if (creep)
-        for (int ty = ty0; ty < ty1; ++ty)
-            for (int tx = tx0; tx < tx1; ++tx) {
-                const std::uint32_t pos = std::uint32_t(ty * int(map.width) + tx);
-                const unsigned edge = gb(rdram, edges + pos);
-                if (edge && (gh(rdram, map.game_tiles + pos * 2) & 0x8000))
-                    draw_creep_edge(cache.bytes.data(), w, h, tx * 32 - cam_x + 2 * vx, ty * 32 - cam_y + 2 * vy, edge - 1);
-            }
-    if (!complete) cache.tiles = ~hash; // not kept: unmatched minitiles get matched over the next frames
+    if (shift && verify) { // hdverify: the shifted terrain must equal a full redraw
+        thread_local std::vector<std::uint8_t> full;
+        full.resize(std::size_t(w) * h);
+        const bool whole = draw_region(view, full.data(), 0, w, 0, h);
+        if (creep) draw_edges(view, full.data(), tx0, ty0, tx1, ty1, 0, int(w), 0, int(h));
+        std::size_t differ = 0;
+        for (std::size_t i = 0; i < full.size(); ++i) differ += full[i] != cache.bytes[i];
+        if (++shifts_verified % 300 == 0) sc64::shell::log::info("hd: %llu terrain shifts verified", (unsigned long long)shifts_verified);
+        if (differ && whole) sc64::shell::log::warning("hd: shifted terrain differs in %zu pixels (dx %d dy %d)", differ, dx, dy);
+    }
+    cache.cam_x = cam_x; cache.cam_y = cam_y; cache.vx = vx; cache.vy = vy; cache.w = w; cache.h = h;
+    cache.game_tiles = map.game_tiles; cache.tx0 = tx0; cache.ty0 = ty0; cache.tx1 = tx1; cache.ty1 = ty1;
+    cache.tiles = tiles;
+    cache.valid = complete; // unmatched minitiles get matched over the next frames: redraw in full
     std::memcpy(rdram + offset(c.pixels), cache.bytes.data(), cache.bytes.size());
 }
 }
