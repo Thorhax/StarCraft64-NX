@@ -46,6 +46,30 @@ void main() {
 }
 )";
 
+// Packs the drawn targets for readback, which crosses uncached memory: per 32 pixels
+// one word of their store bits (bit 16 of each) and 16 words of two RGBA16 values
+// (the even pixel in the low half), 17/32 of the 32-bit buffer's bytes.
+const char* pack_source = R"(#version 430 core
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly buffer Framebuffer { uint fb[]; };
+layout(std430, binding = 1) writeonly buffer Packed { uint packed[]; };
+uniform uint u_count;
+void main() {
+    uint group = gl_GlobalInvocationID.x;
+    uint first = group * 32u;
+    if (first >= u_count) return;
+    uint mask = 0u;
+    for (uint k = 0u; k < 32u; k += 2u) {
+        uint a = first + k < u_count ? fb[first + k] : 0u;
+        uint b = first + k + 1u < u_count ? fb[first + k + 1u] : 0u;
+        mask |= ((a >> 16) & 1u) << k;
+        mask |= ((b >> 16) & 1u) << (k + 1u);
+        packed[group * 17u + 1u + k / 2u] = (a & 0xffffu) | ((b & 0xffffu) << 16);
+    }
+    packed[group * 17u] = mask;
+}
+)";
+
 // Mirrors raster_band(): sample -> combine -> alpha tests -> blend -> dither -> store.
 const char* fragment_source = R"(#version 430 core
 // Target rows from u_origin.z, row-major, one uint per pixel: raw RGBA16 in
@@ -253,6 +277,9 @@ struct GlRaster::Impl {
     // fb_buffer: where the shader draws (GPU-friendly memory). read_buffer: CPU
     // readable staging copy (GL_STREAM_READ), filled by one GPU-side copy.
     GLuint fb_buffer = 0, read_buffer = 0;
+    GLuint pack_program = 0, pack_buffer = 0; // readback packing (pack_source); 0: plain readback
+    GLint u_pack_count = -1;
+    std::size_t pack_capacity = 0;
     std::size_t fb_capacity = 0, ssbo_alignment = 256; // bytes, queried at init
     std::map<GridKey, Grid> grids;
     std::deque<GridKey> grid_order; // creation order, for eviction between frames
@@ -348,6 +375,22 @@ bool GlRaster::init() {
     g.u_rgb = loc("u_rgb"); g.u_alpha_in = loc("u_alpha_in"); g.u_blend = loc("u_blend");
     g.u_blend_b = loc("u_blend_b"); g.u_blend_color = loc("u_blend_color"); g.u_fog_color = loc("u_fog_color");
     g.u_fb_width = loc("u_fb_width");
+    if (const GLuint compute = compile(GL_COMPUTE_SHADER, pack_source)) {
+        g.pack_program = glCreateProgram();
+        glAttachShader(g.pack_program, compute);
+        glLinkProgram(g.pack_program);
+        glDeleteShader(compute);
+        GLint packed = 0;
+        glGetProgramiv(g.pack_program, GL_LINK_STATUS, &packed);
+        if (packed) {
+            g.u_pack_count = glGetUniformLocation(g.pack_program, "u_count");
+            glGenBuffers(1, &g.pack_buffer);
+        } else {
+            glDeleteProgram(g.pack_program);
+            g.pack_program = 0;
+            sc64::shell::log::warning("GL raster: readback packing unavailable, plain readback");
+        }
+    }
     glGenBuffers(1, &g.fb_buffer);
     glGenBuffers(1, &g.read_buffer);
     GLint alignment = 0;
@@ -375,6 +418,9 @@ void GlRaster::shutdown() {
     if (g.fbo) glDeleteFramebuffers(1, &g.fbo);
     if (g.vao) glDeleteVertexArrays(1, &g.vao);
     if (g.program) glDeleteProgram(g.program);
+    if (g.pack_program) glDeleteProgram(g.pack_program);
+    if (g.pack_buffer) glDeleteBuffers(1, &g.pack_buffer);
+    g.pack_program = g.pack_buffer = 0;
     g.lut = g.fbo = g.vao = g.program = 0;
 }
 
@@ -632,10 +678,25 @@ bool GlRaster::render(const gfx::DrawList& list, gfx::SoftwareResult& out) {
         glUniform4i(g.u_fog_color, plan.fog_color.r, plan.fog_color.g, plan.fog_color.b, plan.fog_color.a);
         glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
     }
+    const std::size_t groups = (pixels.size() + 31) / 32;
+    const std::size_t packed_bytes = groups * 17 * 4;
+    if (g.pack_program) {
+        glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+        if (packed_bytes > g.pack_capacity) {
+            glBindBuffer(GL_SHADER_STORAGE_BUFFER, g.pack_buffer);
+            glBufferData(GL_SHADER_STORAGE_BUFFER, GLsizeiptr(packed_bytes), nullptr, GL_DYNAMIC_COPY);
+            g.pack_capacity = packed_bytes;
+        }
+        glUseProgram(g.pack_program);
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, g.fb_buffer);
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, g.pack_buffer);
+        glUniform1ui(g.u_pack_count, GLuint(pixels.size()));
+        glDispatchCompute(GLuint((groups + 63) / 64), 1, 1);
+    }
     glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT | GL_SHADER_STORAGE_BARRIER_BIT);
-    glBindBuffer(GL_COPY_READ_BUFFER, g.fb_buffer);
+    glBindBuffer(GL_COPY_READ_BUFFER, g.pack_program ? g.pack_buffer : g.fb_buffer);
     glBindBuffer(GL_COPY_WRITE_BUFFER, g.read_buffer);
-    glCopyBufferSubData(GL_COPY_READ_BUFFER, GL_COPY_WRITE_BUFFER, 0, 0, GLsizeiptr(bytes));
+    glCopyBufferSubData(GL_COPY_READ_BUFFER, GL_COPY_WRITE_BUFFER, 0, 0, GLsizeiptr(g.pack_program ? packed_bytes : bytes));
     const auto t_drawn = clock::now();
     // GPU time measured on its own, so readback is the pure transfer.
     glFinish();
@@ -651,29 +712,46 @@ bool GlRaster::render(const gfx::DrawList& list, gfx::SoftwareResult& out) {
     out = gfx::SoftwareResult{std::move(ram), 0, {}};
     glPixelStorei(GL_PACK_ALIGNMENT, 1);
     const auto t_read = clock::now();
+    const std::size_t read_bytes = g.pack_program ? packed_bytes : bytes;
     const auto* mapped = static_cast<const std::uint32_t*>(
-        glMapBufferRange(GL_COPY_WRITE_BUFFER, 0, GLsizeiptr(bytes), GL_MAP_READ_BIT));
+        glMapBufferRange(GL_COPY_WRITE_BUFFER, 0, GLsizeiptr(read_bytes), GL_MAP_READ_BIT));
     if (!mapped) {
         sc64::shell::log::warning("GL raster: framebuffer map failed, frame rendered in software");
         return false;
     }
-    std::memcpy(pixels.data(), mapped, bytes); // one sequential copy out of GPU memory
+    std::memcpy(pixels.data(), mapped, read_bytes); // one sequential copy out of GPU memory
     glUnmapBuffer(GL_COPY_WRITE_BUFFER);
     readback_ms = ms(t_read, clock::now());
+    // Pixel i of the target buffer: its store bit and RGBA16 value.
+    auto stored = [&](std::size_t i) {
+        return g.pack_program ? bool(pixels[(i >> 5) * 17] >> (i & 31) & 1u) : bool(pixels[i] & 0x10000u);
+    };
+    auto value = [&](std::size_t i) {
+        return g.pack_program ? std::uint32_t(pixels[(i >> 5) * 17 + 1 + ((i & 31) >> 1)] >> ((i & 1) * 16) & 0xffffu)
+                              : std::uint32_t(pixels[i] & 0xffffu);
+    };
     for (const auto& region : regions) {
         const std::size_t w = region.image.width;
-        for (int row = 0; row < region.y1 - region.y0; ++row)
-            for (std::size_t x = 0; x < w; ++x) {
-                const std::uint32_t value = pixels[region.offset + std::size_t(row) * w + x];
-                if (!(value & 0x10000u)) continue;
-                const std::uint32_t a = std::uint32_t(region.image.address + (std::size_t(region.y0 + row) * w + x) * 2);
-                out.ram[a] = std::uint8_t(value >> 8);
-                out.ram[a + 1] = std::uint8_t(value);
+        for (int row = 0; row < region.y1 - region.y0; ++row) {
+            const std::size_t first = region.offset + std::size_t(row) * w;
+            const std::uint32_t row_address = std::uint32_t(region.image.address + std::size_t(region.y0 + row) * w * 2);
+            std::uint8_t* dst = out.ram.data() + row_address;
+            for (std::size_t x = 0; x < w;) {
+                while (x < w && !stored(first + x)) ++x;
+                const std::size_t start = x;
+                for (; x < w && stored(first + x); ++x) {
+                    const std::uint32_t v = value(first + x);
+                    dst[x * 2] = std::uint8_t(v >> 8);
+                    dst[x * 2 + 1] = std::uint8_t(v);
+                }
+                if (x == start) continue;
+                const std::uint32_t a = row_address + std::uint32_t(start * 2), length = std::uint32_t((x - start) * 2);
                 if (!out.writes.empty() && std::uint64_t(out.writes.back().address) + out.writes.back().length == a)
-                    out.writes.back().length += 2;
-                else out.writes.push_back({a, 2});
-                ++out.written_pixels;
+                    out.writes.back().length += length;
+                else out.writes.push_back({a, length});
+                out.written_pixels += x - start;
             }
+        }
     }
     const auto by_address = [](auto x, auto y) { return x.address < y.address; };
     std::sort(out.writes.begin(), out.writes.end(), by_address);
