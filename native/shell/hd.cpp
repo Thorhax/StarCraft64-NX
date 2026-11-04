@@ -267,28 +267,42 @@ bool locate_map(const std::uint8_t* rdram, unsigned width, unsigned height) {
         const auto& f = features(tileset);
         const std::size_t groups = tileset.cv5.size() / 52, pc_megas = tileset.vx4.size() / 16, pc_minis = f.size() / 48;
         std::size_t learned = 0;
-        std::unordered_map<unsigned, std::unordered_map<unsigned, unsigned>> votes; // N64 minitile -> PC minitile -> count
-        for (std::size_t pos = 0; pos < std::size_t(width) * height; ++pos) {
-            const unsigned pc_tile = ram[at + 8 + pos * 2] | ram[at + 9 + pos * 2] << 8;
-            const unsigned n = gh(rdram, map.game_tiles + std::uint32_t(pos) * 2) & 0x7fff;
-            if ((pc_tile >> 4) >= groups) continue;
-            const unsigned pc_mega = tileset.cv5[(pc_tile >> 4) * 52 + 20 + (pc_tile & 15) * 2]
-                                     | tileset.cv5[(pc_tile >> 4) * 52 + 21 + (pc_tile & 15) * 2] << 8;
-            if (pc_mega >= pc_megas) continue;
-            for (unsigned k = 0; k < 16; ++k) {
-                const unsigned rn = gh(rdram, map.megas + n * 32 + k * 2), rp = tileset.vx4[pc_mega * 16 + k];
-                if ((rn & 1) != (rp & 1) || (rp >> 1) >= pc_minis) continue;
-                ++votes[rn >> 1][rp >> 1];
+        // Every (N64 minitile, PC minitile) pair where the two tiles agree in flips.
+        auto each_pair = [&](auto&& pair) {
+            for (std::size_t pos = 0; pos < std::size_t(width) * height; ++pos) {
+                const unsigned pc_tile = ram[at + 8 + pos * 2] | ram[at + 9 + pos * 2] << 8;
+                const unsigned n = gh(rdram, map.game_tiles + std::uint32_t(pos) * 2) & 0x7fff;
+                if ((pc_tile >> 4) >= groups) continue;
+                const unsigned pc_mega = tileset.cv5[(pc_tile >> 4) * 52 + 20 + (pc_tile & 15) * 2]
+                                         | tileset.cv5[(pc_tile >> 4) * 52 + 21 + (pc_tile & 15) * 2] << 8;
+                if (pc_mega >= pc_megas) continue;
+                for (unsigned k = 0; k < 16; ++k) {
+                    const unsigned rn = gh(rdram, map.megas + n * 32 + k * 2), rp = tileset.vx4[pc_mega * 16 + k];
+                    if ((rn & 1) != (rp & 1) || (rp >> 1) >= pc_minis) continue;
+                    pair(rn >> 1, rp >> 1);
+                }
             }
-        }
+        };
+        // The PC minitile under more than half of each N64 one's pairs: a majority vote
+        // (Boyer-Moore) in one pass, its count confirmed in a second.
+        std::vector<std::int32_t> candidate;
+        std::vector<std::uint32_t> lead, total, agree;
+        auto grow = [&](unsigned mini) {
+            if (mini < candidate.size()) return;
+            candidate.resize(mini + 1, -1); lead.resize(mini + 1, 0); total.resize(mini + 1, 0); agree.resize(mini + 1, 0);
+        };
+        each_pair([&](unsigned mini, unsigned pc) {
+            grow(mini);
+            ++total[mini];
+            if (lead[mini] == 0) { candidate[mini] = std::int32_t(pc); lead[mini] = 1; }
+            else if (candidate[mini] == std::int32_t(pc)) ++lead[mini];
+            else --lead[mini];
+        });
+        each_pair([&](unsigned mini, unsigned pc) { agree[mini] += candidate[mini] == std::int32_t(pc); });
         std::map<std::int32_t, unsigned> offsets;
-        for (const auto& [mini, counts] : votes) {
-            unsigned total = 0, most = 0, pc = 0;
-            for (const auto& [candidate, count] : counts) {
-                total += count;
-                if (count > most) { most = count; pc = candidate; }
-            }
-            if (most * 2 <= total) continue;
+        for (unsigned mini = 0; mini < candidate.size(); ++mini) {
+            if (!total[mini] || agree[mini] * 2 <= total[mini]) continue;
+            const unsigned pc = unsigned(candidate[mini]);
             float n64[48];
             n64_features(rdram, tileset, mini, n64);
             if (distance(n64, f.data() + std::size_t(pc) * 48) > same_look) continue;
@@ -974,8 +988,11 @@ extern "C" void sc64_hd_terrain(std::uint8_t* rdram, recomp_context*) {
     const unsigned map_w = gh(rdram, map_size), map_h = gh(rdram, map_size + 2);
     if (!map_w || !map_h || map_w > 256 || map_h > 256) return;
     if (gw(rdram, tile_array) != map.game_tiles || gw(rdram, n64_megatiles) != map.megas || map_w != map.width
-        || map_h != map.height)
+        || map_h != map.height) {
+        const auto located = Clock::now();
         locate_map(rdram, map_w, map_h);
+        sc64::shell::log::info("hd: map located in %.1f ms", since(located));
+    }
     if (!map.found) return;
     if (!scratch) {
         scratch = guest_alloc(rdram, scratch_size + 16);
