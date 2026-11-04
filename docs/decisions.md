@@ -2034,3 +2034,25 @@ Switch, byte-identical to the previous output (`hdverify` compared both over
 5,400 frames). A copy that only rewrites changed lines was
 measured slower on the Switch (3.0 ms: two read streams) and `-O3` for the
 generated code gave no measurable change; both were dropped.
+
+## ADR-084 — Decoded-background cache sized to the menu's cycle (ACCEPTED)
+
+**Context:** Since the v0.5 Switch port the interpreter keeps decoded S2DEX
+backgrounds across tasks (an exception to ADR-052's "no cross-task cache", never
+recorded): an entry is reused only when the source bytes, TMEM/TLUT, geometry,
+palette and TLUT mode are identical, so its pixels and content key equal a fresh
+decode. It held 64 entries, first in first out. The main menu's animated units
+cycle through ~450 distinct background pieces, so a 64-entry FIFO missed a
+third of all pieces (~200,000 texels decoded and FNV-hashed per frame; 10-18 ms
+of interpretation per menu frame on the Switch).
+
+**Decision:** Bound the cache by bytes (128 MiB) instead of entries, store pixels
+packed in 32 bits (decoded components are 0..255; `Color` is 16 bytes), and
+filter candidates with a quick hash of the source before the full byte
+comparison. Hit conditions and keys are unchanged (ADR-052's key encoding stays).
+
+**Consequences:** Switch main menu: interpretation 10-18 → 3.8 ms per frame, GPU
+raster 9-12 → 7 ms (repeated keys also hit its texture cache), 33-37 → 40 tasks
+per second. The whole menu cycle takes ~100 MiB. `gfx_core_fixtures` runs its
+checkpointed interpretation first, since a repeated identical background is now
+a cache hit without a decode loop.

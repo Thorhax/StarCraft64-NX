@@ -1,5 +1,8 @@
 #include "gfx.hpp"
 #include <algorithm>
+#include <span>
+#include <deque>
+#include <cstring>
 #include <iomanip>
 #include <sstream>
 #include <stdexcept>
@@ -12,16 +15,37 @@ enum class ImageAddresses { Physical, Segmented };
 // CI, geometry, palette and TLUT mode), so the pixels and their content key are
 // exactly what a fresh decode would produce. Menus redraw 640x480 backgrounds
 // every frame; decoding and hashing them per texel dominated menu frame time.
+// The main menu's animated units cycle through ~450 distinct pieces: the cache holds
+// them all (by bytes, oldest evicted first; a FIFO smaller than the cycle never hits).
+// Pixels are kept packed (decoded components are 0..255), and a quick hash of the
+// source picks the candidates the full comparison then confirms.
 struct BackgroundCacheEntry {
     Image image; unsigned height = 0, palette = 0, mode = 0;
+    std::uint64_t source_hash = 0;
     std::vector<std::uint8_t> source;
     std::array<std::uint8_t,4096> tmem{};
-    std::vector<Color> pixels;
+    std::vector<std::uint32_t> pixels;
     std::uint64_t key = 0;
+    std::size_t bytes() const { return source.size() + pixels.size() * 4 + sizeof(*this); }
 };
-std::vector<BackgroundCacheEntry>& background_cache() {
-    thread_local std::vector<BackgroundCacheEntry> cache;
+struct BackgroundCache { std::deque<BackgroundCacheEntry> entries; std::size_t bytes = 0; };
+constexpr std::size_t background_cache_budget = 128u << 20;
+BackgroundCache& background_cache() {
+    thread_local BackgroundCache cache;
     return cache;
+}
+std::uint64_t source_hash(std::span<const std::uint8_t> bytes) {
+    std::uint64_t lanes[4] = {0x9e3779b97f4a7c15ull, 0xc2b2ae3d27d4eb4full, 0x165667b19e3779f9ull, 0x27d4eb2f165667c5ull};
+    std::size_t i = 0;
+    for (; i + 32 <= bytes.size(); i += 32)
+        for (unsigned k = 0; k < 4; ++k) {
+            std::uint64_t v; std::memcpy(&v, bytes.data() + i + k * 8, 8);
+            lanes[k] = (lanes[k] ^ v) * 0x100000001b3ull;
+            lanes[k] ^= lanes[k] >> 29;
+        }
+    std::uint64_t h = lanes[0] ^ (lanes[1] << 1) ^ (lanes[2] << 2) ^ (lanes[3] << 3) ^ bytes.size();
+    for (; i < bytes.size(); ++i) h = (h ^ bytes[i]) * 0x100000001b3ull;
+    return h;
 }
 class Interpreter {
 public:
@@ -254,9 +278,10 @@ public:
         const std::size_t source_size=std::size_t((std::uint64_t(width)*height*(4u<<size)+7)/8);
         const auto source=std::span<const std::uint8_t>(out.initial_ram).subspan(img.address,source_size);
         auto& cache=background_cache();
+        const std::uint64_t quick=source_hash(source);
         const BackgroundCacheEntry* hit=nullptr;
-        for(const auto& e:cache)
-            if(e.image==img && e.height==height && e.palette==tex.tile.palette && e.mode==mode
+        for(const auto& e:cache.entries)
+            if(e.source_hash==quick && e.image==img && e.height==height && e.palette==tex.tile.palette && e.mode==mode
                && std::equal(e.source.begin(),e.source.end(),source.begin(),source.end())
                && (format!=2 || e.tmem==tmem.bytes)) {hit=&e;break;}
         if(format==2 && size==1 && mode==2) {
@@ -265,7 +290,11 @@ public:
         }
         unsigned texture_index;
         if(hit) {
-            tex.pixels=hit->pixels;
+            tex.pixels.resize(hit->pixels.size());
+            for(std::size_t i=0;i<hit->pixels.size();++i) {
+                const std::uint32_t c=hit->pixels[i];
+                tex.pixels[i]={int(c&255),int(c>>8&255),int(c>>16&255),int(c>>24)};
+            }
             texture_index=store_known(std::move(tex),hit->key);
         } else {
             tex.pixels.reserve(width*height);
@@ -277,14 +306,22 @@ public:
             texture_index=store(std::move(tex));
             BackgroundCacheEntry entry;
             entry.image=img;entry.height=height;entry.palette=out.textures[texture_index].tile.palette;entry.mode=mode;
+            entry.source_hash=quick;
             entry.source.assign(source.begin(),source.end());
             if(format==2)entry.tmem=tmem.bytes;
-            entry.pixels=out.textures[texture_index].pixels;
+            const auto& decoded=out.textures[texture_index].pixels;
+            entry.pixels.resize(decoded.size());
+            for(std::size_t i=0;i<decoded.size();++i)
+                entry.pixels[i]=std::uint32_t(decoded[i].r)|std::uint32_t(decoded[i].g)<<8
+                                |std::uint32_t(decoded[i].b)<<16|std::uint32_t(decoded[i].a)<<24;
             entry.key=out.textures[texture_index].key;
-            // Menus draw ~17 background pieces per frame, briefings ~8: a 4-entry
-            // FIFO evicted every piece before its next use (profile: 0 hits).
-            if(cache.size()>=64)cache.erase(cache.begin());
-            cache.push_back(std::move(entry));
+            // Menus draw ~17 background pieces per frame, briefings ~8.
+            cache.bytes+=entry.bytes();
+            cache.entries.push_back(std::move(entry));
+            while(cache.bytes>background_cache_budget && cache.entries.size()>1) {
+                cache.bytes-=cache.entries.front().bytes();
+                cache.entries.pop_front();
+            }
         }
         Rectangle r;r.texture=texture_index;r.source=img.address;
         r.x0=std::int16_t(half(descriptor+4));r.y0=std::int16_t(half(descriptor+12));

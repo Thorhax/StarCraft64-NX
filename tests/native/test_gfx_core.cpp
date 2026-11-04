@@ -175,14 +175,17 @@ void interpreter_checkpoint_fixtures() {
     put(ram,0x3108,256);put(ram,0x310c,256);
     put(ram,0x3110,0x10000);put(ram,0x3114,0xfff40002);
     for(unsigned i=0;i<64*64;++i) {ram[0x10000+i*2]=0xf8;ram[0x10001+i*2]=1;}
-    const auto original=interpret_gbi(ram,0x1000);
+    // The checkpointed pass first: a later identical background is a decoded-
+    // background cache hit (ADR-084) and runs no decode loop.
     unsigned polls=0;
+    const auto unchanged=ram;
     const auto serviced=interpret_gbi(ram,0x1000,[&] {
         ++polls;
         // A guest thread can modify live RAM after the snapshot. Decoder
         // checkpoints must continue reading the complete owned snapshot.
         ram[0x10000]=0;
     });
+    const auto original=interpret_gbi(unchanged,0x1000);
     require(polls>64,"Checkpoints occur within background decode/hash loops");
     require(serviced.opcodes==original.opcodes && serviced.textures[0].key==original.textures[0].key,
         "Scheduling does not change display-list commands or content keys");
