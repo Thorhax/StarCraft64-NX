@@ -57,9 +57,10 @@ static void rdp_completion_regression() {
     guest[0x2000^3]=0x52; // unrelated CPU data must survive an old packet
     commit_rdp_writes(faded->pixels,guest);
     frames.publish(std::make_shared<DrawList>(fade),{},faded);
-    std::shared_ptr<const RenderedFrame> presented;
-    assert(frames.take(nullptr,&presented)->identity.task==2);
-    assert(presented==faded); // first presentation was discarded, its stores were not
+    const auto packets=frames.take(); // both packets, oldest first
+    assert(packets.size()==2 && packets[0].frame->identity.task==1 && packets[1].frame->identity.task==2);
+    const auto presented=packets[1].rendered;
+    assert(presented==faded); // the newer presentation and the stores of both
     assert(guest[0x1000^3]==0x78 && guest[0x1001^3]==0x01);
     assert(guest[0x1008^3]==0x03 && guest[0x1009^3]==0xc1);
     assert(guest[0x2000^3]==0x52);
@@ -531,15 +532,17 @@ int main() {
     assert(signed_output[2]==32767 && signed_output[3]==-32768);
 
     FrameMailbox mailbox;
-    assert(!mailbox.take());
+    assert(mailbox.take().empty());
     auto first = std::make_shared<sc64::gfx::DrawList>();
     first->identity.task = 1;
     first->initial_ram = {1, 2, 3};
     sc64::runtime::FrontendFeedback first_ui; first_ui.items.push_back({42});
     mailbox.publish(first,first_ui);
-    sc64::runtime::FrontendFeedback held_ui;
-    auto held = mailbox.take(&held_ui);
-    assert(!mailbox.take());
+    auto taken = mailbox.take();
+    assert(taken.size() == 1);
+    const auto held = taken[0].frame;
+    const auto held_ui = taken[0].ui;
+    assert(mailbox.take().empty());
     first.reset();
     std::thread producer([&] {
         for (unsigned i = 2; i <= 1000; ++i) {
@@ -549,7 +552,8 @@ int main() {
         }
     });
     producer.join();
-    assert(mailbox.take()->identity.task == 1000);
+    const auto latest = mailbox.take(); // a consumer three behind keeps the newest three, in order
+    assert(latest.size() == 3 && latest[0].frame->identity.task == 998 && latest[2].frame->identity.task == 1000);
     assert(held->identity.task == 1 && held->initial_ram[2] == 3);
     assert(held_ui.items.size()==1 && held_ui.items[0].id==42);
 

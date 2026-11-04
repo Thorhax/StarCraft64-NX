@@ -23,36 +23,36 @@ struct RenderedFrame {
     double software_ms=0, software_service_ms=0;
     hd::Frames hd; // HD mission canvases finished before this task (hd.hpp)
 };
-// Three owned slots; the consumer holds a shared packet while the producer can
-// replace an obsolete slot. No pointer into guest memory crosses this boundary.
+// Three owned slots in publication order. The consumer takes every packet published
+// since its last call, oldest first: a frame finished in the same display refresh as
+// the next one still reaches VI selection instead of being superseded unseen. Only
+// when the consumer is three behind does the producer replace the oldest. No pointer
+// into guest memory crosses this boundary.
 class FrameMailbox {
 public:
+    struct Packet {
+        std::shared_ptr<const gfx::DrawList> frame;
+        runtime::FrontendFeedback ui;
+        std::shared_ptr<const RenderedFrame> rendered;
+    };
     void publish(std::shared_ptr<const gfx::DrawList> frame, runtime::FrontendFeedback ui = {},
                  std::shared_ptr<const RenderedFrame> rendered = {}) {
         std::lock_guard lock(mutex_);
-        slots_[next_] = std::move(frame);
-        ui_[next_] = std::move(ui);
-        rendered_[next_] = std::move(rendered);
-        latest_ = next_;
-        next_ = (next_ + 1) % slots_.size();
-        fresh_ = true;
+        slots_[published_ % slots_.size()] = {std::move(frame), std::move(ui), std::move(rendered)};
+        ++published_;
     }
-    std::shared_ptr<const gfx::DrawList> take(runtime::FrontendFeedback* ui = nullptr,
-                                            std::shared_ptr<const RenderedFrame>* rendered = nullptr) {
+    std::vector<Packet> take() {
         std::lock_guard lock(mutex_);
-        if (!fresh_) return {};
-        fresh_ = false;
-        if (ui) *ui = ui_[latest_];
-        if (rendered) *rendered = rendered_[latest_];
-        return slots_[latest_];
+        std::vector<Packet> out;
+        for (auto i = std::max(taken_, published_ - std::min<std::uint64_t>(published_, slots_.size())); i < published_; ++i)
+            out.push_back(std::move(slots_[i % slots_.size()]));
+        taken_ = published_;
+        return out;
     }
 private:
     std::mutex mutex_;
-    std::array<std::shared_ptr<const gfx::DrawList>, 3> slots_{};
-    std::array<runtime::FrontendFeedback, 3> ui_{};
-    std::array<std::shared_ptr<const RenderedFrame>, 3> rendered_{};
-    std::size_t latest_ = 0, next_ = 0;
-    bool fresh_ = false;
+    std::array<Packet, 3> slots_{};
+    std::uint64_t published_ = 0, taken_ = 0;
 };
 
 class PauseClock {

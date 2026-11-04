@@ -144,11 +144,13 @@ std::optional<Native::Upload> Native::tick() {
         }
         const bool probe = !probe_cases_.empty();
         if (probe && !probe_loaded_) load_probe_case();
-        runtime::FrontendFeedback frontend;
-        std::shared_ptr<const desktop::RenderedFrame> rendered;
-        auto frame = session().mailbox.take(&frontend, &rendered);
-        if (frame) ++mailbox_frames_;
-        if (frame && !frame->rectangles.empty()) {
+        // Every frame finished since the last loop, oldest first (FrameMailbox).
+        for (auto& packet : session().mailbox.take()) {
+            const auto& frame = packet.frame;
+            const auto& frontend = packet.ui;
+            const auto& rendered = packet.rendered;
+            if (frame) ++mailbox_frames_;
+            if (!frame || frame->rectangles.empty()) continue;
             const auto frame_cursor = desktop::read_cursor(frame->initial_ram, frame->identity.field);
             const auto frame_ui = desktop::read_ui(frame->initial_ram, frame->identity.field, frontend);
             pause_policy_.observe_mode(frame_ui.guest_mode);
