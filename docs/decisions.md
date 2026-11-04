@@ -2129,3 +2129,23 @@ added unclamped, then the voices; the whole mix only gets a soft limit above
 title, Zerg, victory and Brood War Terran tracks: no sample changed), 1.4 dB
 quieter relative to the effects than before.
 
+## ADR-088 — Animated PC portraits in briefings (ACCEPTED, user request 2026-11-04)
+
+**Context:** PC StarCraft has no higher-resolution briefing art (both are 640×480),
+but its unit portraits are animated (talking and fidget videos), while the N64
+shows one still frame of the same 60×56 portrait (research.md).
+
+**Decision:** `extract_graphics.py` also copies every portrait video named by
+`arr/portdata.dat` into `hd/portrait` with an index. `portraits.cpp` decodes them
+with FFmpeg in the background, identifies each still N64 portrait texture by its
+nearest PC first frame (both orientations and the 4 column offsets; close and at
+least 1.3× closer than any other portrait, duplicates in portdata skipped), and on
+the Gfx thread before rasterizing replaces that texture's texels with the current
+PC frame: the talking videos while a briefing or transmission voice plays, the
+first frame with a fidget every 3-8 s otherwise. The game's own placement and
+scaling draw it. `nohd` keeps the N64 portraits.
+
+**Consequences:** About 10 MB of portrait videos in `hd/portrait`. In-mission
+transmission boxes draw their portrait inside a larger panel image and keep the
+N64 one.
+

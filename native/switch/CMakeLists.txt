@@ -77,8 +77,9 @@ target_compile_definitions(sc64_shell PRIVATE SC64_VOICES=1)
 # PC movies (native/shell/movie.cpp) through the switch-ffmpeg portlibs.
 find_library(SC64_AVFORMAT avformat PATHS /opt/devkitpro/portlibs/switch/lib)
 if(SC64_AVFORMAT)
-    target_sources(sc64_shell PRIVATE ${SC64_ROOT}/native/shell/movie.cpp ${SC64_ROOT}/native/shell/music.cpp)
-    target_compile_definitions(sc64_shell PUBLIC SC64_MOVIES=1 SC64_MUSIC=1)
+    target_sources(sc64_shell PRIVATE ${SC64_ROOT}/native/shell/movie.cpp ${SC64_ROOT}/native/shell/music.cpp
+        ${SC64_ROOT}/native/shell/portraits.cpp)
+    target_compile_definitions(sc64_shell PUBLIC SC64_MOVIES=1 SC64_MUSIC=1 SC64_PORTRAITS=1)
     target_include_directories(sc64_shell PRIVATE /opt/devkitpro/portlibs/switch/include)
     target_link_libraries(sc64_shell PUBLIC "${SC64_AVFORMAT}" avcodec swscale swresample avutil dav1d bz2 z)
     target_link_directories(sc64_shell PUBLIC /opt/devkitpro/portlibs/switch/lib)

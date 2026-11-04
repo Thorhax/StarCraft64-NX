@@ -10,6 +10,9 @@
 #include "video.hpp"
 #include "voices.hpp"
 #include "hd.hpp"
+#if defined(SC64_PORTRAITS)
+#include "portraits.hpp"
+#endif
 #if defined(SC64_MUSIC)
 #include "music.hpp"
 #endif
@@ -188,6 +191,9 @@ SDL_AppResult SDL_AppInit(void** state, int argc, char* argv[]) {
         app->native->initialize();
         sc64::voices::initialize((std::filesystem::path(app->native->storage()) / "voices").string());
         sc64::hd::initialize((std::filesystem::path(app->native->storage()) / "hd").string());
+#if defined(SC64_PORTRAITS)
+        sc64::portraits::initialize((std::filesystem::path(app->native->storage()) / "hd").string());
+#endif
 #if defined(SC64_MUSIC)
         sc64::music::initialize((std::filesystem::path(app->native->storage()) / "music").string());
 #endif

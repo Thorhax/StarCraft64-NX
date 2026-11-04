@@ -388,6 +388,10 @@ void observe_messages(const std::uint8_t* ram) {
     play(ingame_root + "/" + best->file);
 }
 
+bool speaking() {
+    std::lock_guard audio(audio_mutex);
+    return voice && position < double(voice->size());
+}
 Briefing last_briefing() {
     std::lock_guard lock(briefing_mutex);
     return briefing;
@@ -411,7 +415,7 @@ void mix(float* stereo, unsigned frames) {
         }
         for (int c = 0; c < 2; ++c) {
             float& out = stereo[f * 2 + c];
-            out = std::clamp(out * duck + sample, -1.0f, 1.0f);
+            out = out * duck + sample; // the output limits the whole mix (audio.cpp)
         }
     }
 }

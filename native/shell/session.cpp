@@ -1,6 +1,9 @@
 #include "session.hpp"
 #include "log.hpp"
 #include "platform.hpp"
+#if defined(SC64_PORTRAITS)
+#include "portraits.hpp"
+#endif
 #include "audio.hpp"
 #include "clock_bridge.hpp"
 #include "rdp_writeback.hpp"
@@ -362,6 +365,9 @@ std::shared_ptr<const RenderedFrame> render_task(SubmittedTask& job, std::shared
         [](gfx::DrawList* done) { recycle(snapshot_pool, std::move(done->initial_ram)); delete done; });
     session().capture_interpret_ms = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - interpret_start).count();
+#if defined(SC64_PORTRAITS)
+    sc64::portraits::apply(*list); // animated PC portraits in place of the still N64 ones
+#endif
     list->identity.task = ++session().tasks;
     list->identity.field = session().fields;
     for (const auto& rect : list->rectangles) session().cpu_scanouts.targeted(rect.target.address, list->identity.task);

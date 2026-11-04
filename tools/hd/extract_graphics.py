@@ -6,9 +6,11 @@ Copies, under lower-case names, what native/shell/hd.cpp draws missions with:
   arr/images.dat, arr/images.tbl          Brood War image table (same IDs as the N64 game)
   tileset/<era>.cv5/.vx4/.vr4/.wpe/.grp   the eight terrain tilesets (.grp: creep edges)
   unit/**.grp                             every image graphic images.dat names
+  portrait/**.smk, portrait/index.json    the unit portraits (idle and talking videos,
+                                          arr/portdata.dat), for animated briefing portraits
 from BrooDat.mpq (Brood War) over StarDat.mpq, then Patch_rt.mpq, as the game loads them.
 """
-import os, struct, sys
+import json, os, struct, sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'voices'))
 import mpq
@@ -59,7 +61,34 @@ def main():
         if data: total += save(name, data); files += 1
         else: missing.append(name)
     if missing: print(f'{len(missing)} graphics missing, e.g. {missing[:3]}')
-    print(f'{files} files, {total / 1e6:.1f} MB in {out}')
+    # Portraits: portdata.dat holds the idle and talking name IDs (portdata.tbl) of
+    # each portrait; a name plus a digit and .smk is one variant (TMaFid0 -> TMaFid00.smk).
+    data, table = read('arr\\portdata.dat'), read('arr\\portdata.tbl')
+    portraits = []
+    if data and table:
+        tbl_count = struct.unpack_from('<H', table)[0]
+        def tbl(i):
+            offset = struct.unpack_from('<H', table, 2 + 2 * (i - 1))[0]
+            return table[offset:table.index(b'\0', offset)].decode('latin-1')
+        n = len(data) // 12
+        for p in range(n):
+            entry = {}
+            for kind, base in (('idle', 0), ('talk', 4 * n)):
+                index = struct.unpack_from('<I', data, base + 4 * p)[0]
+                entry[kind] = []
+                if not 0 < index <= tbl_count: continue
+                for digit in range(10):
+                    name = 'portrait\\' + tbl(index) + str(digit) + '.smk'
+                    smk = read(name)
+                    if not smk: continue
+                    total += save(name, smk); files += 1
+                    entry[kind].append(name.replace('\\', '/').lower())
+            portraits.append(entry)
+        (out / 'portrait').mkdir(parents=True, exist_ok=True)
+        (out / 'portrait/index.json').write_text(json.dumps(portraits, indent=0))
+    else:
+        print('arr/portdata.dat missing: no animated portraits')
+    print(f'{files} files ({len(portraits)} portraits), {total / 1e6:.1f} MB in {out}')
 
 if __name__ == '__main__':
     main()

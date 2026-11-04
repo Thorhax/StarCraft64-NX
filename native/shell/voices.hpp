@@ -21,4 +21,6 @@ void observe_messages(const std::uint8_t* ram);
 // matched, and a serial bumped by every match. Matching also runs with novoices.
 struct Briefing { std::string mission; std::uint64_t serial = 0; };
 Briefing last_briefing();
+// Any thread: a briefing or transmission voice is playing (animated portraits talk).
+bool speaking();
 }

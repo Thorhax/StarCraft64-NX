@@ -331,12 +331,15 @@ install (1.16; the Remastered edition stores its graphics differently):
 STORMLIB=$PWD/StormLib/build/libstorm.so python3 tools/hd/extract_graphics.py /mnt/c/path/to/StarCraft local/hd
 ```
 
-It copies the image table, the eight terrain tilesets (with their creep edges)
-and every unit, building and effect graphic (875 files, about 25 MB). Run it
-again if your `hd` folder predates the creep edges (no `tileset/*.grp`). Copy `local/hd` to the SD card as
-`switch/StarCraft64/hd`. `sc64.log` shows `hd: 833 PC graphics, 8 tilesets`
-at start-up and `hd: map 64x64, badlands, ...` when a mission starts. One-player
-missions only; split-screen keeps the N64 graphics.
+It copies the image table, the eight terrain tilesets (with their creep edges),
+every unit, building and effect graphic and the animated unit portraits shown in
+briefings (about 1,500 files, 35 MB). Run it again if your `hd` folder predates
+the creep edges (no `tileset/*.grp`) or the portraits (no `portrait/`). Copy
+`local/hd` to the SD card as `switch/StarCraft64/hd`. `sc64.log` shows
+`hd: 833 PC graphics, 8 tilesets` and `portraits: 110 PC portraits` at start-up
+and `hd: map 64x64, badlands, ...` when a mission starts. HD graphics are for
+one-player missions; split-screen keeps the N64 graphics. In briefings the
+speaker's portrait plays the PC talking and idle animations.
 
 ### Option files
 

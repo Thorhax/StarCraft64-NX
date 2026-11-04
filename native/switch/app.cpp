@@ -7,6 +7,9 @@
 #include "platform.hpp"
 #include "voices.hpp"
 #include "hd.hpp"
+#if defined(SC64_PORTRAITS)
+#include "portraits.hpp"
+#endif
 #if defined(SC64_MUSIC)
 #include "music.hpp"
 #endif
@@ -578,6 +581,10 @@ int main(int argc, char* argv[]) {
         sc64::voices::initialize(std::string(storage_dir) + "/voices");
         // HD missions from the user's own PC graphics (tools/hd/extract_graphics.py); nohd keeps the N64 ones.
         sc64::hd::initialize(std::string(storage_dir) + "/hd");
+#if defined(SC64_PORTRAITS)
+        // Animated portraits from the same PC graphics (extract_graphics.py, hd/portrait).
+        sc64::portraits::initialize(std::string(storage_dir) + "/hd");
+#endif
 #if defined(SC64_MUSIC)
         // PC music from the user's own CDs (tools/music/extract_music.py); n64music keeps the original.
         sc64::music::initialize(std::string(storage_dir) + "/music");
