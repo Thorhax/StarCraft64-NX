@@ -2173,3 +2173,25 @@ follows the mouse and after any touch or controller press.
 meaning, so controller play is unchanged. PC command hotkeys (A, M, S, H, P and
 build letters) are not mapped yet; the N64 shows commands as C-button hints whose
 labels would have to be identified first.
+
+## ADR-090 — PC voices only for briefings and lines the PC game voices (ACCEPTED, user report 2026-11-04)
+
+**Context:** The user reported wrong voices in both Episode I training missions.
+Neither has a PC recording: Boot Camp and the final training briefing are N64
+texts. A briefing was voiced when its pages aligned with a PC mission at 0.25,
+and they reached 0.33 (Terran mission 8) and 0.35 (mission 12). In-mission
+lines matched at 0.6 shared words over the shorter text, so a one-word PC line
+("What?", "Let's go!") matched any N64 line containing that word; both training
+missions and the N64 secret missions played such lines.
+
+**Decision:** Scoring all 86 N64 briefing scripts against the PC index separates
+them: every PC briefing aligns at 0.83 or more, every N64-only one (training,
+secret and bonus missions) at 0.53 or less, so the briefing threshold is 0.7.
+In-mission lines score shared words over the longer text; across every N64
+map transmission the voiced ones score 0.76 or more and the false matches 0.67
+or less, so their threshold is 0.7. An unmatched briefing clears the briefed
+mission, so the next lines and cinematics do not follow the previous mission.
+
+**Consequences:** N64-only briefings and messages stay silent, as the N64
+original is. The N64 cheat-code messages with reworded first sentences still
+play the PC "Cheat code downloaded" line.

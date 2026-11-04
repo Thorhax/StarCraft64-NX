@@ -21,7 +21,9 @@ namespace {
 constexpr std::uint32_t script_pointer_address = 0x800dd028; // -> "<OBJECTIVE>...<PORTn><TEXT>..." script
 constexpr std::uint32_t page_address = 0x800ddb58;           // current <TEXT> page, 0-based
 constexpr float voice_gain = 0.9f, music_duck = 0.45f;
-constexpr double mission_threshold = 0.25, page_threshold = 0.12;
+// Every PC-voiced N64 briefing aligns at 0.83 or more; the N64-only ones (Boot Camp,
+// the final training, the secret missions) reach 0.53 at most (ADR-090).
+constexpr double mission_threshold = 0.7, page_threshold = 0.12;
 
 using Words = std::vector<std::uint32_t>; // sorted, unique word hashes
 
@@ -55,6 +57,12 @@ double overlap(const Words& a, const Words& b) {
     }
     return double(common) / double(std::min(a.size(), b.size()));
 }
+// Shared words over the longer text: a short PC line ("What?", "Let's go!") is not a
+// match for every longer N64 line containing its words.
+double similarity(const Words& a, const Words& b) {
+    if (a.empty() || b.empty()) return 0;
+    return overlap(a, b) * double(std::min(a.size(), b.size())) / double(std::max(a.size(), b.size()));
+}
 
 struct Mission {
     std::string key;
@@ -72,7 +80,7 @@ Briefing briefing;
 // ---- In-mission transmissions (ingame.json, tools/voices/extract_ingame_voices.py)
 constexpr std::uint32_t message_id_address = 0x800b03d8;   // advisor/transmission box, 0xFFFF when closed
 constexpr std::uint32_t message_text_address = 0x800b03e0; // -> the text it shows
-constexpr double line_threshold = 0.6;
+constexpr double line_threshold = 0.7; // similarity(): voiced lines 0.76+, others 0.67 at most
 struct Line { Words words; std::string file; };
 std::map<std::string, std::vector<Line>> ingame; // by PC mission key
 std::string ingame_root;
@@ -226,6 +234,8 @@ void match(const std::uint8_t* ram) {
     if (mission < 0 || best < mission_threshold) {
         sc64::shell::log::info("voices: briefing with %zu pages not matched (best %.2f)", pages.size(), best);
         mission = -1;
+        std::lock_guard lock(briefing_mutex);
+        briefing.mission.clear(); // in-mission lines no longer prefer the previous mission
         return;
     }
     {
@@ -378,7 +388,7 @@ void observe_messages(const std::uint8_t* ram) {
     double best_score = 0;
     auto search = [&](const std::vector<Line>& lines) {
         for (const auto& line : lines)
-            if (const double score = overlap(words, line.words); score > best_score) { best_score = score; best = &line; }
+            if (const double score = similarity(words, line.words); score > best_score) { best_score = score; best = &line; }
     };
     if (const auto it = ingame.find(mission); it != ingame.end()) search(it->second);
     if (best_score < line_threshold)
