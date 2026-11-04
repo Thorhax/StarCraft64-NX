@@ -2060,7 +2060,7 @@ and shared with the cache entry (`Texture::packed`, read through
 and the menu runs at 59.2-59.6 tasks per second (the guest thread uses 9.4 ms of
 CPU per menu frame and waits for each task's completion, so the serial chain
 of guest work, interpretation and GPU raster must fit a field). `glcheck`:
-2,760 frames, GPU and CPU output identical. The whole menu cycle takes ~100 MiB. `gfx_core_fixtures` runs its
+2,760 frames, GPU and CPU output identical. ADR-086 then paces menus to 30 (their animation is per frame). The whole menu cycle takes ~100 MiB. `gfx_core_fixtures` runs its
 checkpointed interpretation first, since a repeated identical background is now
 a cache hit without a decode loop.
 
@@ -2090,3 +2090,23 @@ than the RDP's (it keeps 8 bits where the RDP truncates to 5). Composition costs
 missions still 60/60. (The first commit of this ADR required an unset filter bit
 and so applied no veil; the 0.7 ms it reported was measured without veils.)
 
+
+## ADR-086 — Menus and briefings paced to 30 fps (ACCEPTED, user decision 2026-11-04)
+
+**Context:** The game advances its frontend animations once per rendered frame,
+not by elapsed time: the main menu's animated pieces repeat after a median 0.634 s
+at 30 tasks per second (desktop) and 0.333 s at 60 (Switch, after ADR-084), so
+faster rendering played them faster. Missions run on their own clock. The
+original hardware ran these screens far slower than the port can.
+
+**Decision:** Outside missions (`game_mode` != 3) the Gfx thread completes each
+task no earlier than two VI fields after the previous one (bounded at 50 ms per
+task, so a pause or shutdown never holds it); the game then paces itself at 30.
+Missions keep 60. The menu and briefing speed-ups (ADR-084, the direct upload of
+packed background texels in the GL raster) remain as headroom.
+
+**Consequences:** Main menu and briefings at a steady 30 tasks per second with the
+animation speed they have at 30 (briefings stay at 30 rather than dipping to 27-28
+when a frame ran long); the boot animation and title likewise. With the widescreen
+fix of the boot cinematic (research.md, `0x80064580`), the PC opening movies also
+play in widescreen again: their detection needs the cinematic's original VI scale.

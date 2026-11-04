@@ -12,6 +12,7 @@
 #include "../runtime/guest_poll.hpp"
 #include "../runtime/rom_image.hpp"
 #include "../runtime/minimap.hpp"
+#include "../runtime/guest_addresses.hpp"
 #include <librecomp/game.hpp>
 #include <librecomp/overlays.hpp>
 #include <librecomp/rsp.hpp>
@@ -97,9 +98,25 @@ public:
             if (!job->rendered) job->rendered = render_task(*job, job->list, [] {});
             completed_task_ = job->list->identity.task;
             session().mailbox.publish(std::move(job->list), std::move(job->ui), std::move(job->rendered));
+            pace_frontend(job->rdram);
         } catch (const std::exception& error) {
             session().fail(error.what());
         }
+    }
+    // Outside missions the game advances its animations once per frame, whatever the
+    // frame rate: menus and briefings are held to 30 fps (ADR-086), each task completing
+    // at least two VI fields after the previous one. Missions keep their own pace. The
+    // wait is bounded so a pause or shutdown never holds the Gfx thread.
+    std::uint64_t paced_field_ = 0;
+    void pace_frontend(const std::uint8_t* rdram) {
+        std::uint16_t mode = 0;
+        std::memcpy(&mode, rdram + (sc64::runtime::guest::physical(sc64::runtime::guest::game_mode) ^ 2), 2);
+        if (mode != 3) {
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(50);
+            while (session().fields.load() < paced_field_ + 2 && std::chrono::steady_clock::now() < deadline)
+                std::this_thread::sleep_for(std::chrono::microseconds(250));
+        }
+        paced_field_ = session().fields.load();
     }
     void send_dummy_workload(std::uint32_t) override {}
     void update_screen() override {
