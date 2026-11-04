@@ -198,6 +198,9 @@ SDL_AppResult SDL_AppInit(void** state, int argc, char* argv[]) {
             [raw](int code) { raw->exit_code = code; },
             [raw] { return raw->video.name(); }});
         sc64::desktop::session().unlock_cheats = app->config.number("sc64.unlock_cheats", 0) == 1;
+        // The Switch's arrangement (Gfx thread renders while the game continues), for testing it here.
+        sc64::desktop::session().async_graphics = app->config.number("sc64.async_graphics", 0) == 1;
+        sc64::desktop::session().sync_snapshot = app->config.number("sc64.sync_snapshot", 0) == 1;
         if (const int width = int(app->config.number("sc64.widescreen", 0)); width)
             sc64::runtime::set_widescreen(width);
         app->native->initialize();

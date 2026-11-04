@@ -123,6 +123,8 @@ public:
     // Switch: interpret/rasterize on the Gfx thread while the guest continues
     // (DP completion follows the work). Off: render on the submitting thread.
     bool async_graphics = false;
+    // Copy all RDRAM on the guest thread at every task (no copy in the background, ADR-092).
+    bool sync_snapshot = false;
     // Cheats page: every cheat available without the campaign's hidden unlock
     // triggers (the trigger action calling 8003FB48 at 80081154 sets these bits
     // in 800D13D0; 8006B970 masks the names of cheats whose bit is clear).

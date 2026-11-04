@@ -1,5 +1,6 @@
 #pragma once
 #include <array>
+#include <bitset>
 #include <cstdint>
 #include <atomic>
 #include <condition_variable>
@@ -94,6 +95,8 @@ struct DrawList {
     FrameIdentity identity;
     // Each packet owns all bytes; a submitter cannot recycle its RAM snapshot.
     std::vector<std::uint8_t> initial_ram;
+    // The 4 KiB pages of initial_ram that interpretation read.
+    std::bitset<0x800000 / 4096> pages_read;
     std::vector<Texture> textures;
     std::vector<Rectangle> rectangles;
     std::array<std::uint64_t,256> opcodes{};

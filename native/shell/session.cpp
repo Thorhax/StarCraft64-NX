@@ -28,10 +28,117 @@
 #include <sstream>
 #include <iomanip>
 #include <stdexcept>
+#include <bitset>
 
 extern "C" {
 #include "funcs.h"
 #include "recomp_overlays.inl"
+}
+
+namespace {
+// Big-endian copy of the live RDRAM: rdram keeps host-order 32-bit words, so
+// canonical[i] = rdram[i ^ 3] is one byte swap per word. One core streams about
+// 7 GB/s, so the 8 MiB take ~2.5 ms; a helper thread on another core takes
+// 128 KiB chunks alongside whoever waits for the copy.
+//
+// In missions with asynchronous graphics the guest copies only the game-state
+// globals the presenter's cursor/UI feedback reads and the pages the last tasks'
+// rendering read (render_pages), then goes on, as the RCP reads RDRAM while the CPU
+// runs: the helper copies the rest, and the Gfx thread finishes the copy before
+// interpreting the task. A few rendered bytes (2 in 3600 tasks on the Zerg base) are
+// rewritten by the game right after submission, so the pages rendering reads are
+// copied at submission, not later (ADR-092).
+constexpr std::size_t snapshot_chunk = 128 * 1024 / 4; // words
+constexpr std::size_t globals_begin = 0x0a0000 / 4096, globals_end = 0x100000 / 4096; // pages
+// Pages read by the last tasks' interpretation and render targets (Gfx thread).
+std::mutex render_pages_mutex;
+std::array<std::bitset<0x800000 / 4096>, 4> render_pages;
+unsigned render_pages_next = 0;
+struct CopyJob {
+    const std::uint32_t* in = nullptr;
+    std::uint32_t* out = nullptr;
+    std::size_t words = 0;
+    std::bitset<0x800000 / 4096> guest_pages; // copied by the guest at submission
+    std::atomic<std::size_t> next{0}, remaining{0}; // words claimed / chunks not yet copied
+    std::mutex mutex;
+    std::condition_variable done;
+};
+struct SnapshotCopy {
+    std::mutex mutex;
+    std::condition_variable posted;
+    std::shared_ptr<CopyJob> job, last;
+    std::uint64_t generation = 0;
+    bool started = false, helper = false;
+};
+SnapshotCopy snapshot_copy;
+void copy_chunks(CopyJob& j) {
+    for (std::size_t begin; (begin = j.next.fetch_add(snapshot_chunk)) < j.words;) {
+        const std::size_t end = std::min(j.words, begin + snapshot_chunk);
+        for (std::size_t page = begin; page < end; page += 1024)
+            if (!j.guest_pages[page / 1024])
+                for (std::size_t i = page; i < std::min(end, page + 1024); ++i) j.out[i] = __builtin_bswap32(j.in[i]);
+        if (j.remaining.fetch_sub(1) == 1) {
+            std::lock_guard lock(j.mutex);
+            j.done.notify_all();
+        }
+    }
+}
+// Helps with the copy's remaining chunks, then waits for the others' to finish.
+void finish_copy(CopyJob& j) {
+    copy_chunks(j);
+    std::unique_lock lock(j.mutex);
+    j.done.wait(lock, [&] { return j.remaining.load() == 0; });
+}
+void snapshot_helper() {
+    sc64_platform_helper_core();
+    auto& s = snapshot_copy;
+    std::uint64_t seen = 0;
+    for (;;) {
+        std::shared_ptr<CopyJob> job;
+        {
+            std::unique_lock lock(s.mutex);
+            s.posted.wait(lock, [&] { return s.generation != seen; });
+            seen = s.generation;
+            job = s.job;
+        }
+        if (job) copy_chunks(*job);
+    }
+}
+// Returns the copy still running when the guest leaves it to the helper (async).
+std::shared_ptr<CopyJob> snapshot_rdram(const std::uint8_t* rdram, std::vector<std::uint8_t>& ram, bool async) {
+    auto& s = snapshot_copy;
+    if (!s.started) { // once; without the helper the guest copies alone
+        s.started = true;
+        s.helper = sc64_platform_thread(snapshot_helper);
+    }
+    if (s.last) { finish_copy(*s.last); s.last.reset(); } // the previous task's, normally long done
+    auto job = std::make_shared<CopyJob>();
+    job->in = reinterpret_cast<const std::uint32_t*>(rdram);
+    job->out = reinterpret_cast<std::uint32_t*>(ram.data());
+    job->words = ram.size() / 4;
+    const bool background = async && s.helper;
+    if (background) {
+        for (std::size_t p = globals_begin; p < globals_end; ++p) job->guest_pages.set(p);
+        std::lock_guard lock(render_pages_mutex);
+        for (const auto& pages : render_pages) job->guest_pages |= pages;
+    }
+    job->remaining = (job->words + snapshot_chunk - 1) / snapshot_chunk;
+    {
+        std::lock_guard lock(s.mutex);
+        s.job = job;
+        ++s.generation;
+    }
+    s.posted.notify_one();
+    if (background) {
+        for (std::size_t p = 0; p < job->guest_pages.size() && p * 1024 < job->words; ++p)
+            if (job->guest_pages[p])
+                for (std::size_t i = p * 1024; i < p * 1024 + 1024; ++i) job->out[i] = __builtin_bswap32(job->in[i]);
+        s.last = job;
+        return job;
+    }
+    finish_copy(*job);
+    return nullptr;
+}
 }
 
 namespace sc64::desktop {
@@ -57,6 +164,9 @@ struct SubmittedTask {
     std::shared_ptr<gfx::DrawList> list;
     std::shared_ptr<const RenderedFrame> rendered;
     std::vector<hd::Taken> hd;
+    // The RDRAM copy the helper is still making; finished before the task is read.
+    std::shared_ptr<CopyJob> copy;
+    ~SubmittedTask() { if (copy) finish_copy(*copy); }
 };
 std::mutex submitted_mutex;
 std::deque<std::unique_ptr<SubmittedTask>> submitted;
@@ -98,7 +208,16 @@ public:
             submitted.pop_front();
         }
         try {
+            if (job->copy) { finish_copy(*job->copy); job->copy.reset(); }
             if (!job->rendered) job->rendered = render_task(*job, job->list, [] {});
+            if (job->list) { // what the next submissions copy at once
+                auto pages = job->list->pages_read;
+                for (const auto& w : gfx::target_extents(*job->list))
+                    for (std::size_t p = w.address / 4096; p < std::min<std::size_t>(pages.size(), (w.address + w.length + 4095) / 4096); ++p)
+                        pages.set(p);
+                std::lock_guard lock(render_pages_mutex);
+                render_pages[render_pages_next++ % render_pages.size()] = pages;
+            }
             completed_task_ = job->list->identity.task;
             session().mailbox.publish(std::move(job->list), std::move(job->ui), std::move(job->rendered));
             pace_frontend(job->rdram);
@@ -399,70 +518,6 @@ std::shared_ptr<const RenderedFrame> render_task(SubmittedTask& job, std::shared
 }
 }
 
-namespace {
-// Big-endian copy of the live RDRAM: rdram keeps host-order 32-bit words, so
-// canonical[i] = rdram[i ^ 3] is one byte swap per word. One core streams about
-// 7 GB/s, so the 8 MiB take ~2.5 ms of the guest thread's frame; a helper thread on
-// another core takes 128 KiB chunks alongside it. The guest returns only when every
-// chunk is copied, and copies them all itself if the helper has not started yet.
-struct SnapshotCopy {
-    std::mutex mutex;
-    std::condition_variable posted, finished;
-    enum class State { idle, posted, running, done } state = State::idle;
-    const std::uint32_t* in = nullptr;
-    std::uint32_t* out = nullptr;
-    std::size_t words = 0;
-    std::atomic<std::size_t> next{0};
-    bool started = false;
-};
-SnapshotCopy snapshot_copy;
-constexpr std::size_t snapshot_chunk = 128 * 1024 / 4; // words
-void copy_snapshot_chunks(SnapshotCopy& s) {
-    for (std::size_t begin; (begin = s.next.fetch_add(snapshot_chunk)) < s.words;) {
-        const std::size_t end = std::min(s.words, begin + snapshot_chunk);
-        for (std::size_t i = begin; i < end; ++i) s.out[i] = __builtin_bswap32(s.in[i]);
-    }
-}
-void snapshot_helper() {
-    sc64_platform_helper_core();
-    auto& s = snapshot_copy;
-    for (;;) {
-        {
-            std::unique_lock lock(s.mutex);
-            s.posted.wait(lock, [&] { return s.state == SnapshotCopy::State::posted; });
-            s.state = SnapshotCopy::State::running;
-        }
-        copy_snapshot_chunks(s);
-        {
-            std::lock_guard lock(s.mutex);
-            s.state = SnapshotCopy::State::done;
-        }
-        s.finished.notify_one();
-    }
-}
-void snapshot_rdram(const std::uint8_t* rdram, std::vector<std::uint8_t>& ram) {
-    auto& s = snapshot_copy;
-    if (!s.started) { // once; without the helper the guest copies alone
-        s.started = true;
-        sc64_platform_thread(snapshot_helper);
-    }
-    {
-        std::lock_guard lock(s.mutex);
-        s.in = reinterpret_cast<const std::uint32_t*>(rdram);
-        s.out = reinterpret_cast<std::uint32_t*>(ram.data());
-        s.words = ram.size() / 4;
-        s.next = 0;
-        s.state = SnapshotCopy::State::posted;
-    }
-    s.posted.notify_one();
-    copy_snapshot_chunks(s);
-    std::unique_lock lock(s.mutex);
-    if (s.state == SnapshotCopy::State::posted) { s.state = SnapshotCopy::State::idle; return; } // helper never began
-    s.finished.wait(lock, [&] { return s.state == SnapshotCopy::State::done; });
-    s.state = SnapshotCopy::State::idle;
-}
-}
-
 extern "C" void sc64_capture_submit(std::uint8_t* rdram, const OSTask* task) {
     using namespace sc64::desktop;
     sc64::runtime::report_host_failure<ultramodern::thread_terminated>([&] {
@@ -482,7 +537,10 @@ extern "C" void sc64_capture_submit(std::uint8_t* rdram, const OSTask* task) {
             if(!snapshot_pool.empty()) { job->ram=std::move(snapshot_pool.back()); snapshot_pool.pop_back(); }
         }
         if(job->ram.size()!=0x800000)job->ram.resize(0x800000); // first use only; later buffers are recycled
-        snapshot_rdram(rdram,job->ram);
+        // Missions with asynchronous graphics continue while the helper copies (ADR-092).
+        std::uint16_t mode=0;
+        std::memcpy(&mode,rdram+(sc64::runtime::guest::physical(sc64::runtime::guest::game_mode)^2),2);
+        job->copy=snapshot_rdram(rdram,job->ram,session().async_graphics && !session().sync_snapshot && mode==3);
         job->rdram=rdram;
         job->ucode=t.ucode;
         job->data_ptr=t.data_ptr;

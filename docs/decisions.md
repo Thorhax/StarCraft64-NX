@@ -2257,3 +2257,34 @@ Wasteland and 600 on the Zerg base (creep) were identical. Desktop terrain
 time while scrolling 0.16 -> 0.06 ms per frame (the remainder is the per-frame
 copy into the guest canvas). The HD composition (about 4 ms desktop, 5.6 ms CPU
 on the Switch) runs on its worker and does not hold the game thread.
+
+**3. Game code (measured; nothing kept).** A gprof build of the desktop
+(game C compiled with `-pg`, dumped with gdb `_mcleanup`) puts all recompiled
+game functions at 3.3 s of a 100 s Zerg-base run, about 0.55 ms per frame;
+the game thread's time is mostly the shell's own work (the RDRAM snapshot, part
+4, and the HD hooks). The busiest game routine, a time poll at `0x8002403C`
+(`osGetTime / 46875` against `0x800A5A80`), spins only at mission start; a
+sleeping replacement made no difference in play and was dropped. The runtime's
+message wait (`wait_for_external_message_timed`) spends CPU in the queue
+semaphore's 10000-iteration spin before blocking; reducing that spin is left
+for a hardware measurement.
+
+**4. Snapshot (kept).** In missions with asynchronous graphics (Switch) the
+guest copies at submission only the game-state globals the cursor/UI feedback
+reads (0x0A0000-0x100000) and the pages the last four tasks' interpretation and
+render targets read (`DrawList::pages_read`, about 0.3-0.5 MB), then continues;
+the helper copies the rest, and the Gfx thread finishes the copy before
+interpreting. The game only reads the results after DP completion, which follows
+rendering, as on the RCP. Verification (a full copy at submission compared on
+every page the frame's interpretation read): with only the globals copied at
+submission, 3 of 3600 tasks differed (2 bytes in 0x242xxx and a burst at scene
+start, data the game rewrites right after submitting); with the learned pages
+also copied at submission, 0 differing bytes in 7200 Zerg-base and 4800
+Wasteland tasks while scrolling. Desktop with `sc64.async_graphics=1`: guest
+snapshot 1.06-1.7 -> 0.21 ms per task, guest CPU about 6.5 -> 5.4 ms per frame.
+Menus keep the synchronous copy. `sdmc:/switch/StarCraft64/syncsnapshot`
+(desktop `--config=sc64.sync_snapshot=1`) restores it everywhere.
+
+**Consequences:** Parts 2 and 4 are verified on the desktop only: the Switch hit
+an Atmosphere fatal error in `am` (0100000000000023) during benchmarking and
+needs a power-button restart before the Switch numbers can be taken.

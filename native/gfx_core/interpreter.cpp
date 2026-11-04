@@ -67,12 +67,15 @@ public:
         out.limitations.push_back("D-029: RGB target reference only; hidden coverage and VI are not bit exact");
     }
     void poll() const { if(checkpoint)checkpoint(); }
+    DrawList finish() { out.pages_read=pages_read; return std::move(out); }
     [[noreturn]] void fail(const std::string& reason,std::uint32_t high=0,std::uint32_t low=0) const {
         std::ostringstream s;s<<reason<<" at PC 0x"<<std::hex<<pc<<" words "<<high<<' '<<low;
         throw std::runtime_error(s.str());
     }
+    mutable std::bitset<0x800000/4096> pages_read;
     void bounds(unsigned a,unsigned n) const {
         if(a>out.initial_ram.size() || n>out.initial_ram.size()-a)fail("RDRAM range exceeds snapshot");
+        if(n)for(unsigned p=a>>12,last=(a+n-1)>>12;p<=last;++p)pages_read.set(p);
     }
     void input_range(unsigned a,unsigned n) const {
         bounds(a,n);
@@ -375,7 +378,7 @@ DrawList interpret_rdp(std::span<const std::uint8_t> ram,std::span<const std::ui
         if(op==0x24 || op==0x25) {if(++i>=words.size())parser.fail("Truncated RDP rectangle");param=words[i];}
         parser.rdp(v>>32,v,param);
     }
-    return std::move(parser.out);
+    return parser.finish();
 }
 DrawList interpret_gbi(std::span<const std::uint8_t> ram,unsigned root,const std::function<void()>& checkpoint) {
     return interpret_gbi(std::vector<std::uint8_t>(ram.begin(),ram.end()),root,checkpoint);
@@ -399,7 +402,7 @@ DrawList interpret_gbi(std::vector<std::uint8_t>&& ram,unsigned root,const std::
             else if((hi>>16&255)!=1)parser.fail("Invalid DL push flag",hi,lo);
             pc=parser.resolve(lo);break;
         case 0xdf:
-            if(stack.empty())return std::move(parser.out);
+            if(stack.empty())return parser.finish();
             pc=stack.back();stack.pop_back();break;
         case 0x09:case 0x0a:parser.background(parser.resolve(lo),op==0x0a);break;
         case 0x05:parser.object_texture(parser.resolve(lo));break;

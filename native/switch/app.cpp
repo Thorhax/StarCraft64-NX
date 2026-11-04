@@ -737,6 +737,9 @@ int main(int argc, char* argv[]) {
         auto* raw = app.get();
         // Graphics tasks run on the Gfx thread while the game continues (like the RCP).
         sc64::desktop::session().async_graphics = true;
+        // The RDRAM snapshot is finished by a helper while the game continues (ADR-092);
+        // sdmc:/switch/StarCraft64/syncsnapshot copies it all at each submission instead.
+        sc64::desktop::session().sync_snapshot = option_file("syncsnapshot");
         // Every cheat on the Cheats page from the start (sdmc:/switch/StarCraft64/lockcheats keeps the original unlocks).
         sc64::desktop::session().unlock_cheats = !option_file("lockcheats");
         // Experimental 16:9 missions (416x240, 3x = 1248x720): sdmc:/switch/StarCraft64/widescreen.
