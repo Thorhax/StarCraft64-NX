@@ -20,6 +20,9 @@
 #include "scripts.hpp"
 #include "pointer.hpp"
 #include <switch.h>
+#if defined(__aarch64__)
+#include <arm_neon.h>
+#endif
 #if defined(SC64_SWITCH_GL)
 #include "gl_device.hpp"
 #endif
@@ -210,7 +213,13 @@ public:
                     if (r == 1) {
                         const std::uint32_t* a = widened(src, w, 2 * q, 0);
                         const std::uint32_t* b = widened(src, w, 2 * q + 1, 1);
-                        for (unsigned x = 0; x < dw; ++x) out[x] = mean(a[x], b[x]);
+                        unsigned x = 0;
+#if defined(__aarch64__)
+                        for (; x + 4 <= dw; x += 4)
+                            vst1q_u32(out + x, vreinterpretq_u32_u8(vhaddq_u8(vreinterpretq_u8_u32(vld1q_u32(a + x)),
+                                                                             vreinterpretq_u8_u32(vld1q_u32(b + x)))));
+#endif
+                        for (; x < dw; ++x) out[x] = mean(a[x], b[x]);
                     } else {
                         const std::uint32_t* a = widened(src, w, 2 * q + (r == 2), r == 2);
                         std::memcpy(out, a, std::size_t(dw) * 4);
@@ -224,7 +233,25 @@ public:
                 }
                 previous = sy;
                 const auto* in = src + std::size_t(sy) * w;
-                for (unsigned x = 0; x < dw; ++x) out[x] = in[xmap_[x]] | 0xff000000u; // RGBA32, opaque
+                unsigned x = 0;
+#if defined(__aarch64__)
+                // The common exact ratios (xmap_ x*w/dw): 3x repeats each pixel, 1.5x
+                // writes pixel pairs (a, b) as (a, a, b).
+                const uint32x4_t opaque = vdupq_n_u32(0xff000000u);
+                if (dw == 3 * w) {
+                    for (; x + 12 <= dw; x += 12) {
+                        const uint32x4_t v = vorrq_u32(vld1q_u32(in + x / 3), opaque);
+                        vst3q_u32(out + x, uint32x4x3_t{{v, v, v}});
+                    }
+                } else if (2 * dw == 3 * w) {
+                    for (; x + 12 <= dw; x += 12) {
+                        const uint32x4x2_t pairs = vld2q_u32(in + x / 3 * 2);
+                        const uint32x4_t a = vorrq_u32(pairs.val[0], opaque);
+                        vst3q_u32(out + x, uint32x4x3_t{{a, a, vorrq_u32(pairs.val[1], opaque)}});
+                    }
+                }
+#endif
+                for (; x < dw; ++x) out[x] = in[xmap_[x]] | 0xff000000u; // RGBA32, opaque
             }
             pointer(y0);
             swizzle(base, stride, y0);
@@ -259,7 +286,22 @@ private:
         if (cached_[slot] == sy) return out;
         cached_[slot] = sy;
         const std::uint32_t* in = src + std::size_t(sy) * w;
-        for (unsigned x = 0; x + 1 < w; x += 2) {
+        unsigned x = 0;
+#if defined(__aarch64__)
+        // Four pixel pairs at a time: even/odd pixels in, (a, mean, b) triples out.
+        const uint32x4_t opaque = vdupq_n_u32(0xff000000u);
+        for (; x + 8 <= w; x += 8) {
+            const uint32x4x2_t pairs = vld2q_u32(in + x);
+            uint32x4x3_t triples;
+            triples.val[0] = vorrq_u32(pairs.val[0], opaque);
+            triples.val[2] = vorrq_u32(pairs.val[1], opaque);
+            triples.val[1] = vreinterpretq_u32_u8(vhaddq_u8(vreinterpretq_u8_u32(triples.val[0]),
+                                                            vreinterpretq_u8_u32(triples.val[2])));
+            vst3q_u32(out, triples);
+            out += 12;
+        }
+#endif
+        for (; x + 1 < w; x += 2) {
             const std::uint32_t a = in[x] | 0xff000000u, b = in[x + 1] | 0xff000000u;
             out[0] = a; out[1] = mean(a, b); out[2] = b; out += 3;
         }

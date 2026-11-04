@@ -2225,3 +2225,20 @@ PC control groups (Ctrl+1 sets group 1).
 **Consequences:** All commands stay original controller input. A key whose
 command lies in a grid other than the first can briefly open and close the
 grids before it. Groups are limited to the N64's four.
+
+## ADR-092 — Overnight optimization round (ACCEPTED, user request 2026-11-04)
+
+**Context:** The user asked for four optimizations in order: faster scaling,
+HD terrain reuse while scrolling, the game code's heaviest functions, and a
+smaller RDRAM snapshot. Each is measured on the Switch (Zerg base,
+`local/rig/zbench.py`) and kept only if it helps.
+
+**1. Scaling (kept).** The framebuffer scaling builds its lines with NEON: HD
+missions widen source lines 2 -> 3 with `vld2`/`vst3` and average the middle
+line with `vhadd` (rounding down the sum instead of each half, at most one
+level brighter); the nearest-neighbour 3x and 1.5x ratios (320 -> 960 missions
+without HD, 640 -> 960 menus) write repeated pixels with `vst3`. Main-loop
+scale time 3.26-3.36 -> 2.36 ms (Zerg base, repeated), 2.37 ms in the main
+menu. Of the rest about 1.1 ms is libnx's cache flush of the 3.7 MB
+framebuffer in `framebufferEnd`, required while presentation stays on the
+CPU framebuffer (switch-gpu-renderer.md).
