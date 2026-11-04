@@ -4,6 +4,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <span>
 #include <string>
@@ -50,6 +51,16 @@ struct Texture {
     Tmem memory;
     unsigned tlut_mode = 0;
     std::vector<Color> pixels;
+    // Interpreted backgrounds keep their decoded texels here instead, packed
+    // (r | g << 8 | b << 16 | a << 24) and shared with the decoded-background cache, so a
+    // cache hit copies nothing (ADR-086). Read texels through texel()/texel_count().
+    std::shared_ptr<const std::vector<std::uint32_t>> packed;
+    std::size_t texel_count() const { return packed ? packed->size() : pixels.size(); }
+    Color texel(std::size_t i) const {
+        if (!packed) return pixels[i];
+        const std::uint32_t c = (*packed)[i];
+        return {int(c & 255), int(c >> 8 & 255), int(c >> 16 & 255), int(c >> 24)};
+    }
     // CI8 backgrounds: the 256-entry palette they were decoded with (HD missions).
     std::vector<Color> palette;
 };

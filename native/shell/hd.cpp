@@ -658,35 +658,48 @@ std::optional<std::vector<std::uint8_t>> compose(const gfx::DrawList& list, cons
             if (&r == bg) { after = true; continue; }
             if (!after || r.target != target) continue;
             const auto rb = gfx::raster_bounds(r);
-            if (rb.empty() || (rb.x1 - rb.x0) * 4 >= (bounds.x1 - bounds.x0) * 3) continue;
             // A copied background marks only its visible texels (dismissed boxes stay
-            // drawn, fully transparent); anything else marks its whole rectangle.
+            // drawn, fully transparent); anything else marks its whole rectangle, and
+            // only when narrower than 3/4 of the view (not the fog layer).
             const gfx::Texture* source = r.texture != gfx::no_texture ? &list.textures[r.texture] : nullptr;
             const bool texels = source && source->background && r.dsdx == 1024 && r.dtdy == 1024
-                                && source->pixels.size() == std::size_t(source->width) * source->height;
+                                && source->texel_count() == std::size_t(source->width) * source->height;
+            if (rb.empty() || (!texels && (rb.x1 - rb.x0) * 4 >= (bounds.x1 - bounds.x0) * 3)) continue;
             // A one-cycle blend drawn by its texels' combined colour: translucent where
             // its weight is below 255 (the blend formula as the rasterizer applies it).
-            // Unfiltered: a 1:1 copied background samples whole texels.
-            const bool blended = texels && (r.state.other_hi >> 20 & 3) == 0 && !(r.state.other_hi & (1u << 13))
+            // Whole texels: at 1:1 with no fractional s/t the RDP's filter returns the texel.
+            const bool blended = texels && (r.state.other_hi >> 20 & 3) == 0 && (r.s & 31) == 0 && (r.t & 31) == 0
                                  && (r.state.other_lo & 3) != 3 && (r.state.other_lo & (1u << 14))
                                  && (r.state.other_lo >> 26 & 3) == 0 && (r.state.other_lo >> 18 & 3) == 0
                                  && (r.state.other_lo >> 30 & 3) == 0 && (r.state.other_lo >> 22 & 3) == 1;
-            // Combined colours by texel colour (a copied CI background has at most 256),
-            // with the rasterizer's coverage and alpha-compare tests; alpha 0: not drawn.
-            thread_local std::unordered_map<std::uint32_t, std::uint32_t> combined;
-            combined.clear();
-            auto combine = [&](const gfx::Color& texel) {
-                const std::uint32_t key = std::uint32_t(texel.r) | std::uint32_t(texel.g) << 8 | std::uint32_t(texel.b) << 16
-                                          | std::uint32_t(texel.a) << 24;
-                if (auto it = combined.find(key); it != combined.end()) return it->second;
-                std::uint32_t value = 0;
-                try {
-                    const gfx::Color c = gfx::combine_color(texel, r.state);
-                    const bool rejected = ((r.state.other_lo & (1u << 12)) && c.a < 32) || ((r.state.other_lo & 1) && c.a < r.state.blend.a);
-                    if (!rejected && c.a > 0)
-                        value = std::uint32_t(c.r) | std::uint32_t(c.g) << 8 | std::uint32_t(c.b) << 16 | std::uint32_t(std::min(c.a, 255)) << 24;
-                } catch (const std::exception&) {}
-                return combined[key] = value;
+            // Combined colours by packed texel colour (a copied CI background has at most
+            // 256): an open-addressed table, with the rasterizer's coverage and alpha-compare
+            // tests; 0: not drawn.
+            thread_local std::array<std::uint64_t, 1024> combined; // texel << 32 | colour, ~0: empty
+            if (blended) combined.fill(~0ull);
+            auto combine = [&](std::uint32_t texel) {
+                for (unsigned slot = (texel * 2654435761u) >> 22;; slot = (slot + 1) & 1023) {
+                    if (combined[slot] == ~0ull) {
+                        std::uint32_t value = 0;
+                        try {
+                            const gfx::Color c = gfx::combine_color({int(texel & 255), int(texel >> 8 & 255), int(texel >> 16 & 255),
+                                                                     int(texel >> 24)}, r.state);
+                            const bool rejected = ((r.state.other_lo & (1u << 12)) && c.a < 32)
+                                                  || ((r.state.other_lo & 1) && c.a < r.state.blend.a);
+                            if (!rejected && c.a > 0)
+                                value = std::uint32_t(c.r) | std::uint32_t(c.g) << 8 | std::uint32_t(c.b) << 16
+                                        | std::uint32_t(std::min(c.a, 255)) << 24;
+                        } catch (const std::exception&) {}
+                        combined[slot] = std::uint64_t(texel) << 32 | value;
+                        return value;
+                    }
+                    if (std::uint32_t(combined[slot] >> 32) == texel) return std::uint32_t(combined[slot]);
+                }
+            };
+            auto packed_texel = [&](std::size_t i) {
+                if (source->packed) return (*source->packed)[i];
+                const gfx::Color c = source->texel(i);
+                return std::uint32_t(c.r) | std::uint32_t(c.g) << 8 | std::uint32_t(c.b) << 16 | std::uint32_t(c.a) << 24;
             };
             for (int y = std::max(0, rb.y0); y < std::min(int(h), rb.y1); ++y)
                 for (int x = std::max(0, rb.x0); x < std::min(int(w), rb.x1); ++x) {
@@ -694,12 +707,12 @@ std::optional<std::vector<std::uint8_t>> compose(const gfx::DrawList& list, cons
                     if (texels) {
                         const int tu = (r.s >> 5) + x - r.x0 / 4, tv = (r.t >> 5) + y - r.y0 / 4;
                         if (tu < 0 || tv < 0 || tu >= int(source->width) || tv >= int(source->height)) continue;
-                        const gfx::Color& texel = source->pixels[std::size_t(tv) * source->width + unsigned(tu)];
+                        const std::uint32_t texel = packed_texel(std::size_t(tv) * source->width + unsigned(tu));
                         if (blended) {
                             const std::uint32_t c = combine(texel);
                             if (!c) continue;
                             if ((c >> 24) < 255 && !overlay[at] && !veil[at]) { veil[at] = c; continue; }
-                        } else if (texel.a == 0) continue;
+                        } else if (!(texel >> 24)) continue;
                     }
                     overlay[at] = 1; veil[at] = 0;
                 }

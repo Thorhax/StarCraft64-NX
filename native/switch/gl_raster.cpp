@@ -283,7 +283,9 @@ struct GlRaster::Impl {
         std::vector<std::uint8_t> texels(std::size_t(w) * h * 4);
         for (int y = 0; y < h; ++y)
             for (int x = 0; x < w; ++x) {
-                const Color c = tex.background ? tex.pixels.at(std::size_t(y0 + y) * tex.width + (x0 + x))
+                const std::size_t at = std::size_t(y0 + y) * tex.width + (x0 + x);
+                if (tex.background && at >= tex.texel_count()) throw Unsupported("texel outside background");
+                const Color c = tex.background ? tex.texel(at)
                                                : tex.memory.fetch(tex.tile, x0 + x, y0 + y, tex.tlut_mode);
                 auto* out = &texels[(std::size_t(y) * w + x) * 4];
                 out[0] = std::uint8_t(std::clamp(c.r, 0, 255)); out[1] = std::uint8_t(std::clamp(c.g, 0, 255));

@@ -205,7 +205,7 @@ std::uint64_t legacy_texture_key(const Texture& tex) {
     const auto& t=tex.tile;
     for(auto v:{t.format,t.size,t.line,t.tmem,t.palette,t.cms,t.cmt,t.masks,t.maskt,t.shifts,t.shiftt,
                 unsigned(t.sl),unsigned(t.tl),unsigned(t.sh),unsigned(t.th)})add(v);
-    for(auto c:tex.pixels)for(int v:{c.r,c.g,c.b,c.a})add(v);
+    for(std::size_t i=0;i<tex.texel_count();++i){auto c=tex.texel(i);for(int v:{c.r,c.g,c.b,c.a})add(v);}
     return hash;
 }
 void texture_key_fixtures() {
@@ -223,7 +223,7 @@ void texture_key_fixtures() {
     const auto& bg=background.textures[0];
     require(bg.key==legacy_texture_key(bg),"All channel values preserve the historical 64-bit key");
     for(unsigned i=0;i<256;++i)
-        require(bg.pixels[i]==Color{ram[0x10000+i*4],ram[0x10000+i*4+1],ram[0x10000+i*4+2],ram[0x10000+i*4+3]},
+        require(bg.texel(i)==Color{ram[0x10000+i*4],ram[0x10000+i*4+1],ram[0x10000+i*4+2],ram[0x10000+i*4+3]},
             "Background pixels equal the independently authored RGBA32 source");
 
     // CI8 snapshots repeat, then a palette load changes the same source index.

@@ -2053,7 +2053,14 @@ comparison. Hit conditions and keys are unchanged (ADR-052's key encoding stays)
 
 **Consequences:** Switch main menu: interpretation 10-18 → 3.8 ms per frame, GPU
 raster 9-12 → 7 ms (repeated keys also hit its texture cache), 33-37 → 40 tasks
-per second. The whole menu cycle takes ~100 MiB. `gfx_core_fixtures` runs its
+per second. A hit still unpacked its texels into 16-byte `Color`s
+(3.25 of the 3.8 ms): interpreted backgrounds now keep their texels only packed
+and shared with the cache entry (`Texture::packed`, read through
+`texel()`/`texel_count()`), so a hit copies a pointer. Interpretation 0.64 ms,
+and the menu runs at 59.2-59.6 tasks per second (the guest thread uses 9.4 ms of
+CPU per menu frame and waits for each task's completion, so the serial chain
+of guest work, interpretation and GPU raster must fit a field). `glcheck`:
+2,760 frames, GPU and CPU output identical. The whole menu cycle takes ~100 MiB. `gfx_core_fixtures` runs its
 checkpointed interpretation first, since a repeated identical background is now
 a cache hit without a decode loop.
 
@@ -2072,7 +2079,14 @@ bits; the fog tolerance widens by the blend's division), estimates fog there as
 elsewhere, and applies the same veil over the four HD pixels. Opaque passes
 (text, borders, portraits) and every other overlay still keep the drawn pixels.
 
+Copied backgrounds are marked texel by texel, so they are exempt from the 3/4
+width rule (in 4:3 the advisor box is 247 of 320 pixels wide). The filter bit
+these layers set does not change a 1:1 copy at whole-texel coordinates.
+
 **Consequences:** Boxes, the minimap and the command panel show HD terrain and
-units through them, fog included. Composition costs ~0.7 ms more on the Switch
-(5.7 ms CPU in Wasteland).
+units through them, fog included; on average the HD result is ~3/255 brighter
+than the RDP's (it keeps 8 bits where the RDP truncates to 5). Composition costs
+~1.9 ms more on the Switch (6.9 ms CPU in Wasteland, 6.2 in the Zerg base),
+missions still 60/60. (The first commit of this ADR required an unset filter bit
+and so applied no veil; the 0.7 ms it reported was measured without veils.)
 

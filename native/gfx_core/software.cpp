@@ -37,7 +37,7 @@ Color sample(const Texture& tex,int s,int t,bool filter,bool copy) {
             y=address(tt,tex.tile.maskt,tex.tile.cmt,(tex.tile.th-tex.tile.tl)/4,copy);
             return tex.memory.fetch(tex.tile,x,y,tex.tlut_mode);
         }
-        return tex.pixels[std::size_t(y)*tex.width+x];
+        return tex.texel(std::size_t(y)*tex.width+x);
     };
     auto c=fetch(s,t);if(!filter)return c;
     // RDP's three-point interpolation, in 5-bit fractional coordinates.

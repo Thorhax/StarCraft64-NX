@@ -467,10 +467,21 @@ extern "C" void sc64_capture_submit(std::uint8_t* rdram, const OSTask* task) {
         job->hd=sc64::hd::take(rdram);
         session().capture_snapshot_ms=std::chrono::duration<double,std::milli>(
             std::chrono::steady_clock::now()-snapshot_start).count();
-        { // the snapshot is on the guest thread's critical path: its mean, every 1800 tasks
-            static double total=0; static unsigned count=0;
-            total+=session().capture_snapshot_ms; if(++count==1800) {
-                sc64::shell::log::info("snapshot ms/task: %.2f", total/count); total=0; count=0; }
+        { // the snapshot is on the guest thread's critical path: its mean, every 1800 tasks,
+          // with the guest thread's CPU time and the wall time between submissions
+            static double total=0, guest_cpu=0, guest_wall=0, last_cpu=-1;
+            static std::chrono::steady_clock::time_point last_wall;
+            static unsigned count=0;
+            const double cpu=sc64_platform_thread_cpu_ms();
+            if(last_cpu>=0) {
+                guest_cpu+=cpu-last_cpu;
+                guest_wall+=std::chrono::duration<double,std::milli>(snapshot_start-last_wall).count();
+            }
+            last_cpu=cpu; last_wall=snapshot_start;
+            total+=session().capture_snapshot_ms; if(++count==600) {
+                sc64::shell::log::info("snapshot ms/task: %.2f, guest CPU %.2f of %.2f ms between tasks",
+                                       total/count, guest_cpu/count, guest_wall/count);
+                total=guest_cpu=guest_wall=0; count=0; }
         }
         if(!session().async_graphics) {
             // Synchronous (Android/desktop): render here, servicing higher guest

@@ -24,9 +24,9 @@ struct BackgroundCacheEntry {
     std::uint64_t source_hash = 0;
     std::vector<std::uint8_t> source;
     std::array<std::uint8_t,4096> tmem{};
-    std::vector<std::uint32_t> pixels;
+    std::shared_ptr<const std::vector<std::uint32_t>> pixels;
     std::uint64_t key = 0;
-    std::size_t bytes() const { return source.size() + pixels.size() * 4 + sizeof(*this); }
+    std::size_t bytes() const { return source.size() + pixels->size() * 4 + sizeof(*this); }
 };
 struct BackgroundCache { std::deque<BackgroundCacheEntry> entries; std::size_t bytes = 0; };
 constexpr std::size_t background_cache_budget = 128u << 20;
@@ -141,25 +141,31 @@ public:
         for(auto v:{t.format,t.size,t.line,t.tmem,t.palette,t.cms,t.cmt,t.masks,t.maskt,t.shifts,t.shiftt,
                     unsigned(t.sl),unsigned(t.tl),unsigned(t.sh),unsigned(t.th)})add(v);
         // Decoded payload includes every TLUT entry actually sampled by the draw.
-        for(unsigned i=0;i<tex.pixels.size();++i) {
+        for(std::size_t i=0;i<tex.texel_count();++i) {
             if((i&255)==0)poll();
             // All pixels here come from the bounded texture decoders, whose
             // components are 0..255; callers cannot supply arbitrary Colors.
-            auto c=tex.pixels[i];for(int v:{c.r,c.g,c.b,c.a})add_byte(std::uint8_t(v));
+            auto c=tex.texel(i);for(int v:{c.r,c.g,c.b,c.a})add_byte(std::uint8_t(v));
         }
         return hash;
+    }
+    static bool same_texels(const Texture& a,const Texture& b) {
+        if(a.packed && b.packed)return a.packed==b.packed || *a.packed==*b.packed;
+        if(a.texel_count()!=b.texel_count())return false;
+        for(std::size_t i=0;i<a.texel_count();++i)if(!(a.texel(i)==b.texel(i)))return false;
+        return true;
     }
     unsigned insert(Texture tex) {
         const std::uint64_t hash=tex.key;
         for(unsigned i=0;i<out.textures.size();++i)if(out.textures[i].key==hash) {
             const auto& old=out.textures[i];
             if(old.tile==tex.tile && old.width==tex.width && old.height==tex.height &&
-               old.background==tex.background && old.pixels==tex.pixels &&
+               old.background==tex.background && same_texels(old,tex) &&
                old.tlut_mode==tex.tlut_mode && old.memory.bytes==tex.memory.bytes)return i;
             fail("Texture content key collision");
         }
         // Running total of every stored texture (was re-summed per store: O(n^2)).
-        const std::uint64_t allocated=texture_bytes+tex.pixels.size()*sizeof(Color)+4096;
+        const std::uint64_t allocated=texture_bytes+tex.texel_count()*sizeof(Color)+4096;
         if(allocated>64*1024*1024)fail("Owned texture payload exceeds 64 MiB");
         texture_bytes=allocated;
         out.textures.push_back(std::move(tex));return out.textures.size()-1;
@@ -290,11 +296,7 @@ public:
         }
         unsigned texture_index;
         if(hit) {
-            tex.pixels.resize(hit->pixels.size());
-            for(std::size_t i=0;i<hit->pixels.size();++i) {
-                const std::uint32_t c=hit->pixels[i];
-                tex.pixels[i]={int(c&255),int(c>>8&255),int(c>>16&255),int(c>>24)};
-            }
+            tex.packed=hit->pixels;
             texture_index=store_known(std::move(tex),hit->key);
         } else {
             tex.pixels.reserve(width*height);
@@ -309,11 +311,16 @@ public:
             entry.source_hash=quick;
             entry.source.assign(source.begin(),source.end());
             if(format==2)entry.tmem=tmem.bytes;
-            const auto& decoded=out.textures[texture_index].pixels;
-            entry.pixels.resize(decoded.size());
-            for(std::size_t i=0;i<decoded.size();++i)
-                entry.pixels[i]=std::uint32_t(decoded[i].r)|std::uint32_t(decoded[i].g)<<8
-                                |std::uint32_t(decoded[i].b)<<16|std::uint32_t(decoded[i].a)<<24;
+            auto& stored=out.textures[texture_index];
+            if(!stored.packed) {
+                auto packed=std::make_shared<std::vector<std::uint32_t>>(stored.pixels.size());
+                for(std::size_t i=0;i<stored.pixels.size();++i)
+                    (*packed)[i]=std::uint32_t(stored.pixels[i].r)|std::uint32_t(stored.pixels[i].g)<<8
+                                 |std::uint32_t(stored.pixels[i].b)<<16|std::uint32_t(stored.pixels[i].a)<<24;
+                stored.packed=std::move(packed);
+                stored.pixels=std::vector<Color>{};
+            }
+            entry.pixels=stored.packed;
             entry.key=out.textures[texture_index].key;
             // Menus draw ~17 background pieces per frame, briefings ~8.
             cache.bytes+=entry.bytes();
