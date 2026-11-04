@@ -196,7 +196,8 @@ std::optional<Native::Upload> Native::tick() {
                 : std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
             software_service_ms_ = rendered ? rendered->software_service_ms : 0;
         }
-        scanout_ = session().scanout.latest();
+        // The next VI field in order; held while the HD composite of its image is made.
+        if (!hd_waiting_) scanout_ = session().scanout.next();
         std::shared_ptr<const desktop::ScanoutImage> image = probe ? cpu_image_ : scanout_images_.select(scanout_);
         if (!probe) {
             // A CPU swap newer than the matching RDP image is what VI scans.

@@ -2017,8 +2017,16 @@ completes (the game redraws a canvas only after the task presenting it
 completed), and the two common image renderers are drawn natively (pixel-exact
 against the game's functions under `hdverify`).
 
-**Consequences:** Zerg base on a 3-core Switch launch: snapshot 2.7 → 1.5 ms per
-task, 59.5 tasks and 59.5 mailbox frames per second (was 55-57 and as low as 43),
-57 distinct images per second shown. A copy that only rewrites changed lines was
+Presentation also takes the VI fields in order, one per display refresh
+(`ScanoutMailbox::next`): taking the latest field skipped one whenever two
+landed in the same refresh. At most two fields wait (the oldest is dropped,
+bounding the added latency), the previous field is shown again when none is
+new, and the field is held while its image's HD composite is made.
+
+**Consequences:** On a 3-core Switch launch the snapshot drops from 2.7 to 1.5 ms
+per task. Every finished frame is now shown once, in order: Wasteland 60 tasks
+and 60 distinct images per second standing, 57-59 scrolling (was 50-54 shown);
+the Zerg base 58.7 tasks, 58.6 shown (was 51-57 made and as few as 43 shown,
+with backward steps). A copy that only rewrites changed lines was
 measured slower on the Switch (3.0 ms: two read streams) and `-O3` for the
 generated code gave no measurable change; both were dropped.

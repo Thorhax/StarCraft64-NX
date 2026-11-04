@@ -34,9 +34,21 @@ public:
         if ((!latest_.blank() && next.blank()) || regs[2]!=latest_.regs[2]
             || (regs[0]&3)!=(latest_.regs[0]&3)) next.minimum_task=task+1;
         latest_=next;
+        pending_.push_back(next);
+        while (pending_.size()>2) pending_.pop_front();
         if (field>=trace_from_ && field<=trace_to_ && trace_.size()<2048) trace_.push_back(next);
     }
     Scanout latest() { std::lock_guard lock(mutex_); return latest_; }
+    // Presentation: the fields in order, one per display refresh. The guest VI and the
+    // display are separate ~60 Hz clocks; taking the latest field each refresh skips one
+    // whenever two land in the same refresh. At most two fields wait (the oldest is
+    // dropped), and without a new field the previous one is shown again.
+    Scanout next() {
+        std::lock_guard lock(mutex_);
+        if (!pending_.empty()) { presented_=pending_.front(); pending_.pop_front(); }
+        else if (presented_.revision==0) presented_=latest_;
+        return presented_;
+    }
     void trace(std::uint64_t from,std::uint64_t to) {
         std::lock_guard lock(mutex_); trace_from_=from; trace_to_=to;
     }
@@ -45,7 +57,8 @@ public:
     }
 private:
     std::mutex mutex_;
-    Scanout latest_;
+    Scanout latest_, presented_;
+    std::deque<Scanout> pending_;
     std::uint64_t trace_from_=1,trace_to_=0;
     std::vector<Scanout> trace_;
 };

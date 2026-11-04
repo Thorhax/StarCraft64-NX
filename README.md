@@ -350,6 +350,7 @@ rebuilding. A `.txt` extension is fine (`widescreen.txt` works like `widescreen`
 | `novoices` | no voice playback, even when the voice files are installed |
 | `n64music` | the N64 music, even when the PC soundtrack is installed |
 | `nohd` | the N64 mission graphics, even when the PC graphics are installed |
+| `hdverify` | (testing) draws each HD image both natively and with the game's own function and logs any difference |
 | `lockcheats` | keep the original cheat unlocks |
 | `volume` | not empty: one number, the game volume factor (default `4`; `1` = original level) |
 | `softraster` | CPU renderer (v0.5 behaviour), GPU unused |
