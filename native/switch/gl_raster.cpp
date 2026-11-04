@@ -4,6 +4,7 @@
 #include <GL/gl.h>
 #include <GL/glext.h>
 #include <algorithm>
+#include <bit>
 #include <chrono>
 #include <cstring>
 #include <deque>
@@ -280,6 +281,20 @@ struct GlRaster::Impl {
         if (auto it = grids.find(key); it != grids.end()) return it->second;
         const int w = x1 - x0 + 1, h = y1 - y0 + 1;
         if (w <= 0 || h <= 0 || std::size_t(w) * h * 4 > 16u * 1024 * 1024) throw Unsupported("texel grid size");
+        if (tex.background && tex.packed && x0 == 0 && y0 == 0 && unsigned(w) == tex.width && unsigned(h) == tex.height
+            && tex.packed->size() == std::size_t(w) * h && std::endian::native == std::endian::little) {
+            // Interpreted backgrounds keep their texels packed r, g, b, a in memory order:
+            // the RGBA8UI bytes already, uploaded as they are.
+            Grid grid{0, x0, y0, std::size_t(w) * h * 4};
+            glGenTextures(1, &grid.texture);
+            glBindTexture(GL_TEXTURE_2D, grid.texture);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8UI, w, h, 0, GL_RGBA_INTEGER, GL_UNSIGNED_BYTE, tex.packed->data());
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+            grid_order.push_back(key);
+            grid_bytes += grid.bytes;
+            return grids.emplace(key, grid).first->second;
+        }
         std::vector<std::uint8_t> texels(std::size_t(w) * h * 4);
         for (int y = 0; y < h; ++y)
             for (int x = 0; x < w; ++x) {
