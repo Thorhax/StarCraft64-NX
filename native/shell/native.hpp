@@ -111,7 +111,9 @@ private:
     desktop::ViRegion presented_region_;
     // HD mission canvases by N64 canvas address, latest first taken (hd.hpp).
     std::map<std::uint32_t, std::shared_ptr<const hd::Frame>> hd_frames_;
-    std::uint64_t hd_presented_ = 0;
+    std::uint64_t hd_presented_ = 0, hd_composed_ = 0, hd_missed_ = 0, mailbox_frames_ = 0;
+    const desktop::ScanoutImage* hd_waiting_ = nullptr; // HD composite not ready yet, and for how many loops
+    unsigned hd_wait_loops_ = 0;
     bool scanout_visible_ = false;
     unsigned trace_readbacks_ = 0, trace_readback_tail_ = 0;
     bool trace_last_visible_ = false;

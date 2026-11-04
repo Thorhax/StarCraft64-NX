@@ -7,6 +7,8 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
+#include <deque>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -484,7 +486,6 @@ std::optional<std::vector<std::uint8_t>> compose(const gfx::DrawList& list, cons
     // The frame must show exactly the canvas this background presents.
     const std::size_t canvas_bytes = std::size_t(frame->canvas_width) * frame->canvas_height;
     if (frame->canvas + canvas_bytes > list.initial_ram.size()) return std::nullopt;
-    struct Heavy { Heavy() { sc64_platform_heavy_begin(); } ~Heavy() { sc64_platform_heavy_end(); } } heavy;
     const auto started = Clock::now();
     std::uint64_t hash = 14695981039346656037ull;
     const std::uint8_t* canvas = list.initial_ram.data() + frame->canvas;
@@ -651,6 +652,56 @@ std::optional<std::vector<std::uint8_t>> compose(const gfx::DrawList& list, cons
 }
 }
 
+namespace sc64::hd {
+namespace {
+struct Job {
+    std::shared_ptr<const gfx::DrawList> list;
+    Frames frames;
+    std::vector<std::uint8_t> rgba;
+    gfx::Image target;
+    unsigned height = 0;
+    std::shared_ptr<Pending> pending;
+};
+std::mutex job_mutex;
+std::condition_variable job_ready;
+std::deque<Job> jobs;
+bool worker_started = false;
+void worker() {
+    sc64_platform_heavy_begin(); // off core 0 (core 3 or 2 on the Switch), for good
+    for (;;) {
+        Job job;
+        {
+            std::unique_lock lock(job_mutex);
+            job_ready.wait(lock, [] { return !jobs.empty(); });
+            job = std::move(jobs.front());
+            jobs.pop_front();
+        }
+        if (auto image = compose(*job.list, job.frames, job.rgba, job.target, job.height))
+            job.pending->result = std::make_shared<const std::vector<std::uint8_t>>(std::move(*image));
+        job.pending->done.store(true, std::memory_order_release);
+    }
+}
+}
+
+std::shared_ptr<Pending> compose_async(std::shared_ptr<const gfx::DrawList> list, Frames frames,
+                                       std::vector<std::uint8_t> rgba, gfx::Image target, unsigned height) {
+    auto pending = std::make_shared<Pending>();
+    std::lock_guard lock(job_mutex);
+    if (!worker_started) worker_started = sc64_platform_thread(worker);
+    if (!worker_started) { // no thread: compose here
+        if (auto image = compose(*list, frames, rgba, target, height))
+            pending->result = std::make_shared<const std::vector<std::uint8_t>>(std::move(*image));
+        pending->done = true;
+        return pending;
+    }
+    // A frame behind by two is not shown any more: drop it unfinished.
+    while (jobs.size() >= 2) { jobs.front().pending->done = true; jobs.pop_front(); }
+    jobs.push_back({std::move(list), std::move(frames), std::move(rgba), target, height, pending});
+    job_ready.notify_one();
+    return pending;
+}
+}
+
 using namespace sc64::hd;
 
 namespace {
@@ -793,3 +844,4 @@ extern "C" void sc64_hd_image_done(std::uint8_t* rdram, recomp_context*) {
         }
     ++fallbacks;
 }
+

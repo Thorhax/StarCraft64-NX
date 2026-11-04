@@ -4,6 +4,7 @@
 #include "audio.hpp"
 #include "log.hpp"
 #include "native.hpp"
+#include "platform.hpp"
 #include "voices.hpp"
 #include "hd.hpp"
 #if defined(SC64_MUSIC)
@@ -129,6 +130,11 @@ bool option_file(const char* name) {
     return std::filesystem::exists(path, missing) || std::filesystem::exists(path + ".txt", missing);
 }
 
+// Main loop timing, logged every 600 loops: Native::tick (presentation selection and
+// HD composition), the framebuffer scaling, and the wait for a free framebuffer.
+struct LoopProfile { u64 tick = 0, scale = 0, wait = 0, since = 0; unsigned loops = 0; };
+LoopProfile loop_profile;
+
 // Original raster fitted with nearest sampling (320x240 and 640x480 -> 960x720),
 // centred: the same geometry as the shell's Fit viewport, so touch mapping matches.
 class FrameVideo {
@@ -144,14 +150,29 @@ public:
     // Begin/End also presents and paces to the display (double buffered).
     void draw(bool visible) {
         u32 stride = 0;
+        const u64 wait_start = armGetSystemTick();
         auto* base = static_cast<std::uint8_t*>(framebufferBegin(&fb_, &stride));
-        for (unsigned y = 0; y < screen_h; ++y) std::memset(base + std::size_t(y) * stride, 0, screen_w * 4);
-        if (visible && image_ && image_->rgba && image_->width && image_->height
-            && image_->rgba->size() >= std::size_t(image_->width) * image_->height * 4) {
+        const u64 scale_start = armGetSystemTick();
+        loop_profile.wait += armTicksToNs(scale_start - wait_start);
+        // The scaling runs off core 0, which the Gfx thread needs for the game's next task.
+        sc64_platform_heavy_begin();
+        struct Back { ~Back() { sc64_platform_heavy_end(); } } back;
+        struct Scale { u64 start; ~Scale() { loop_profile.scale += armTicksToNs(armGetSystemTick() - start); } } scale{scale_start};
+        const bool shown = visible && image_ && image_->rgba && image_->width && image_->height
+                           && image_->rgba->size() >= std::size_t(image_->width) * image_->height * 4;
+        if (!shown) for (unsigned y = 0; y < screen_h; ++y) std::memset(base + std::size_t(y) * stride, 0, screen_w * 4);
+        if (shown) {
             const unsigned w = image_->width, h = image_->height;
             unsigned dw = screen_w, dh = unsigned(std::uint64_t(screen_w) * h / w);
             if (dh > screen_h) { dh = screen_h; dw = unsigned(std::uint64_t(screen_h) * w / h); }
             const unsigned ox = (screen_w - dw) / 2, oy = (screen_h - dh) / 2;
+            // Only the bars around the image are cleared: the image covers the rest.
+            for (unsigned y = 0; y < screen_h; ++y) {
+                auto* line = base + std::size_t(y) * stride;
+                if (y < oy || y >= oy + dh) { std::memset(line, 0, screen_w * 4); continue; }
+                std::memset(line, 0, ox * 4);
+                std::memset(line + std::size_t(ox + dw) * 4, 0, std::size_t(screen_w - ox - dw) * 4);
+            }
             if (xmap_.size() != dw || xmap_source_ != w) {
                 xmap_.resize(dw);
                 for (unsigned x = 0; x < dw; ++x) xmap_[x] = unsigned(std::uint64_t(x) * w / dw);
@@ -571,7 +592,10 @@ int main(int argc, char* argv[]) {
             const double dt = double(armTicksToNs(now - last)) / 1e9;
             last = now;
             app->poll_input();
-            if (const auto upload = app->native->tick()) {
+            const u64 tick_start = armGetSystemTick();
+            auto upload_now = app->native->tick();
+            loop_profile.tick += armTicksToNs(armGetSystemTick() - tick_start);
+            if (const auto& upload = upload_now) {
 #if defined(SC64_SWITCH_GL)
                 if (app->use_gl) app->gl.upload(*upload); else
 #endif
@@ -594,6 +618,13 @@ int main(int argc, char* argv[]) {
 #endif
             app->video.draw(visible);
             app->native->after_render([] { return Readback{}; });
+            if (++loop_profile.loops == 600) {
+                const double ms = 1e-6 / 600;
+                sc64::shell::log::info("loop ms: tick %.2f scale %.2f wait %.2f | %.1f loops/s",
+                    double(loop_profile.tick) * ms, double(loop_profile.scale) * ms, double(loop_profile.wait) * ms,
+                    600.0 / (double(armTicksToNs(armGetSystemTick() - loop_profile.since)) / 1e9));
+                loop_profile = {}; loop_profile.since = armGetSystemTick();
+            }
         }
         if (app->exit_code) result = *app->exit_code;
     } catch (const std::exception& error) {

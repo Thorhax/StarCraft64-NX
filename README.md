@@ -26,7 +26,8 @@ Their full commit history is kept in this repository. Thank you both.
   circles and health bars, in their own player colours. The game itself is
   unchanged: the same frames, positions and draw order as on the N64, only with
   the PC artwork; fog of war, the HUD and the cursor are kept as the N64 draws
-  them. Scaled smoothly to the screen. From your own PC install (section 11).
+  them. Scaled smoothly to the screen. 60 fps in missions, widescreen included
+  (the composition runs on its own core). From your own PC install (section 11).
 - **PC soundtrack** (optional): the 16-bit 22 kHz stereo music of StarCraft
   and Brood War replaces the N64's 11 kHz mono versions. Each N64 track was
   matched to its PC original; menus play the PC title, missions the full PC

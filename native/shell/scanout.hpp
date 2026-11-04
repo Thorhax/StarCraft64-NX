@@ -1,5 +1,6 @@
 #pragma once
 #include "gfx.hpp"
+#include "hd.hpp"
 #include "cursor_feedback.hpp"
 #include "ui_feedback.hpp"
 #include <algorithm>
@@ -184,7 +185,7 @@ struct ScanoutImage {
     unsigned height=0;
     std::uint64_t task=0;
     std::vector<std::uint8_t> rgba;
-    std::vector<std::uint8_t> hd; // 2x composite of an HD mission frame (hd.hpp), or empty
+    std::shared_ptr<hd::Pending> hd; // 2x composite of an HD mission frame (hd.hpp), being made
     // Input geometry must follow the selected VI image, including retained
     // older tasks while the newest target is offscreen or not yet scanned.
     CursorFeedback cursor;

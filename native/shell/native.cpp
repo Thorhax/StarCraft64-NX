@@ -147,6 +147,7 @@ std::optional<Native::Upload> Native::tick() {
         runtime::FrontendFeedback frontend;
         std::shared_ptr<const desktop::RenderedFrame> rendered;
         auto frame = session().mailbox.take(&frontend, &rendered);
+        if (frame) ++mailbox_frames_;
         if (frame && !frame->rectangles.empty()) {
             const auto frame_cursor = desktop::read_cursor(frame->initial_ram, frame->identity.field);
             const auto frame_ui = desktop::read_ui(frame->initial_ram, frame->identity.field, frontend);
@@ -183,8 +184,8 @@ std::optional<Native::Upload> Native::tick() {
                 if (!probe && !hd_frames_.empty()) {
                     hd::Frames known;
                     for (const auto& [canvas, hd_frame] : hd_frames_) known.push_back(hd_frame);
-                    if (auto composite = hd::compose(*frame, known, image->rgba, target, frame_height))
-                        image->hd = std::move(*composite);
+                    image->hd = hd::compose_async(frame, std::move(known), image->rgba, target, frame_height);
+                    ++hd_composed_;
                 }
                 scanout_images_.add(image);
                 if (probe) { uploaded_image_.reset(); cpu_image_ = image; }
@@ -228,14 +229,24 @@ std::optional<Native::Upload> Native::tick() {
             trace_log_.flush();
         }
         if (!image || image == uploaded_image_) return std::nullopt;
+        // An HD frame being composed is shown when ready (a few loops at most) rather than
+        // flashing its N64 image.
+        if (image->hd && !image->hd->done.load(std::memory_order_acquire)) {
+            if (hd_waiting_ != image.get()) { hd_waiting_ = image.get(); hd_wait_loops_ = 0; }
+            if (++hd_wait_loops_ < 6) return std::nullopt;
+        }
+        hd_waiting_ = nullptr;
         const auto target = image->image;
         const auto frame_height = image->height;
         presented_region_ = probe ? desktop::ViRegion{target.width, frame_height}
                                   : desktop::vi_region(scanout_, target.width, frame_height);
         // An HD mission frame is twice the size; the logical size stays the N64 one.
-        const bool hd_image = !image->hd.empty() && presented_region_ == desktop::ViRegion{target.width, frame_height};
-        auto rgba = std::make_shared<std::vector<std::uint8_t>>(hd_image ? image->hd
-            : desktop::vi_present(image->rgba, target.width, frame_height, presented_region_));
+        const bool hd_image = image->hd && image->hd->done.load(std::memory_order_acquire) && image->hd->result
+                              && presented_region_ == desktop::ViRegion{target.width, frame_height};
+        if (image->hd && !hd_image) ++hd_missed_;
+        std::shared_ptr<const std::vector<std::uint8_t>> rgba = hd_image ? image->hd->result
+            : std::make_shared<std::vector<std::uint8_t>>(desktop::vi_present(image->rgba, target.width, frame_height,
+                                                                              presented_region_));
         if (hd_image) ++hd_presented_;
         if (tracing) {
             // CPU frames share their preceding task number; name them apart.
@@ -396,7 +407,8 @@ nlohmann::json Native::telemetry() {
     auto result = to_json(info());
     result.update({{"tasks", s.tasks.load()}, {"samples", s.samples.load()},
         {"host_seconds", std::chrono::duration<double>(std::chrono::steady_clock::now() - host_started_).count()},
-        {"scanout_visible", scanout_visible_}, {"hd_presented", hd_presented_}, {"vi_revision", scanout_.revision}, {"vi_width", scanout_.regs[2]},
+        {"scanout_visible", scanout_visible_}, {"hd_presented", hd_presented_}, {"hd_composed", hd_composed_},
+        {"hd_missed", hd_missed_}, {"mailbox_frames", mailbox_frames_}, {"vi_revision", scanout_.revision}, {"vi_width", scanout_.regs[2]},
         {"vi_origin", scanout_.regs[1]}, {"cpu_swaps", s.cpu_swaps.load()}, {"vi_rows", presented_region_.height},
         {"render_driver", window_.renderer()}, {"upload_bytes", upload_bytes_}, {"software_ms", software_ms_},
         {"software_service_ms", software_service_ms_}, {"raster_helpers", s.raster ? s.raster->helpers() : 0},

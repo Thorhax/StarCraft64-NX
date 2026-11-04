@@ -45,7 +45,12 @@ bool sc64_platform_thread(void (*entry)()) {
     ++used;
     return true;
 }
-// Core 2 (the GL raster thread, mostly waiting on the GPU) instead of core 0, where the
-// Gfx thread interprets and commits tasks below the main thread's priority.
-void sc64_platform_heavy_begin() { svcSetThreadCoreMask(CUR_THREAD_HANDLE, 2, 1u << 2); }
+// Core 3 when the launch grants it (4-core forwarder), else core 2 (the GL raster thread,
+// mostly waiting on the GPU), instead of core 0, where the Gfx thread interprets and
+// commits tasks below the main thread's priority.
+void sc64_platform_heavy_begin() {
+    static const bool core3 = R_SUCCEEDED(svcSetThreadCoreMask(CUR_THREAD_HANDLE, 3, 1u << 3));
+    if (!core3) svcSetThreadCoreMask(CUR_THREAD_HANDLE, 2, 1u << 2);
+    else svcSetThreadCoreMask(CUR_THREAD_HANDLE, 3, 1u << 3);
+}
 void sc64_platform_heavy_end() { svcSetThreadCoreMask(CUR_THREAD_HANDLE, 0, 1u << 0); }

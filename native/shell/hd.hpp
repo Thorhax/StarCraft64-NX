@@ -7,6 +7,7 @@
 // Presentation replaces each canvas pixel of the finished frame with its 2x2
 // HD block, keeping the RDP's darkening (fog) and everything drawn over it.
 #include "gfx.hpp"
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -28,9 +29,18 @@ void initialize(const std::string& root);
 bool enabled();
 // Guest thread, at each graphics task submission: canvases finished since the last call.
 Frames take(const std::uint8_t* rdram);
-// Main thread: the 2x image of a presented target when it shows an HD canvas.
-// rgba is the target as the RDP left it (width x height); nullopt otherwise.
+// The 2x image of a presented target when it shows an HD canvas. rgba is the target
+// as the RDP left it (width x height); nullopt otherwise.
 std::optional<std::vector<std::uint8_t>> compose(const gfx::DrawList& list, const Frames& frames,
                                                  const std::vector<std::uint8_t>& rgba, const gfx::Image& target,
                                                  unsigned height);
+// A composition on the HD worker thread; result is set (or stays null when the frame is
+// not HD) before done turns true.
+struct Pending {
+    std::atomic<bool> done{false};
+    std::shared_ptr<const std::vector<std::uint8_t>> result;
+};
+// Main thread: compose() in the background, so presentation never waits on it.
+std::shared_ptr<Pending> compose_async(std::shared_ptr<const gfx::DrawList> list, Frames frames,
+                                       std::vector<std::uint8_t> rgba, gfx::Image target, unsigned height);
 }

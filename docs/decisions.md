@@ -1982,8 +1982,14 @@ HUD, cursor) stay as drawn unless untouched. HD frames are scaled with linear
 filtering (an exact 3:2 path on the Switch framebuffer); everything else keeps
 nearest sampling. `nohd` keeps the original.
 
-**Consequences:** No gameplay or timing changes; on the Switch the hooks cost
-~1.1 ms per frame on the guest core (57 instead of 60 graphics tasks per second
-in Wasteland; the terrain is reused while the camera stands still) and
-composition (~7 ms) runs on core 2 to keep the graphics thread on core 0 free. Split-screen, menus and briefings keep the N64 graphics. Frames
+**Consequences:** No gameplay or timing changes. On the Switch the hooks cost
+~1.1 ms per frame on the guest core (the terrain is reused while the camera
+stands still). Composition runs on a worker thread on core 3 when the launch
+grants it, else core 2, and an HD frame is presented when its composite is
+ready (one vsync later at most, normally); the framebuffer scaling also leaves
+core 0, where the Gfx thread interprets the next task below the main thread's
+priority, and only the bars around the image are cleared. With these, 1P
+missions run at 60 graphics tasks per second in 4:3 and in widescreen
+(measured in Wasteland and the attract demo on a 3-core launch; 56-60 frames
+presented). Split-screen, menus and briefings keep the N64 graphics. Frames
 whose canvas does not match the HD frame fall back to the N64 image.
