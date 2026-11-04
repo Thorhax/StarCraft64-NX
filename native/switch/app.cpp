@@ -137,12 +137,14 @@ LoopProfile loop_profile;
 
 // Original raster fitted with nearest sampling (320x240 and 640x480 -> 960x720),
 // centred: the same geometry as the shell's Fit viewport, so touch mapping matches.
+// The framebuffer stays block linear: lines are scaled 8 at a time into a strip
+// that stays in cache and swizzled straight into it, instead of a linear copy
+// that framebufferEnd would read back and swizzle (3.7 MB more each way).
 class FrameVideo {
 public:
     void create() {
         if (R_FAILED(framebufferCreate(&fb_, nwindowGetDefault(), screen_w, screen_h, PIXEL_FORMAT_RGBA_8888, 2)))
             throw std::runtime_error("framebufferCreate failed");
-        if (R_FAILED(framebufferMakeLinear(&fb_))) throw std::runtime_error("framebufferMakeLinear failed");
         ready_ = true;
     }
     void destroy() { if (ready_) framebufferClose(&fb_); ready_ = false; }
@@ -160,67 +162,89 @@ public:
         struct Scale { u64 start; ~Scale() { loop_profile.scale += armTicksToNs(armGetSystemTick() - start); } } scale{scale_start};
         const bool shown = visible && image_ && image_->rgba && image_->width && image_->height
                            && image_->rgba->size() >= std::size_t(image_->width) * image_->height * 4;
-        if (!shown) for (unsigned y = 0; y < screen_h; ++y) std::memset(base + std::size_t(y) * stride, 0, screen_w * 4);
+        unsigned w = 0, h = 0, dw = 0, dh = 0, ox = 0, oy = 0;
+        const std::uint32_t* src = nullptr;
+        bool linear = false;
         if (shown) {
-            const unsigned w = image_->width, h = image_->height;
-            unsigned dw = screen_w, dh = unsigned(std::uint64_t(screen_w) * h / w);
+            w = image_->width; h = image_->height;
+            dw = screen_w; dh = unsigned(std::uint64_t(screen_w) * h / w);
             if (dh > screen_h) { dh = screen_h; dw = unsigned(std::uint64_t(screen_h) * w / h); }
-            const unsigned ox = (screen_w - dw) / 2, oy = (screen_h - dh) / 2;
-            // Only the bars around the image are cleared: the image covers the rest.
-            for (unsigned y = 0; y < screen_h; ++y) {
-                auto* line = base + std::size_t(y) * stride;
-                if (y < oy || y >= oy + dh) { std::memset(line, 0, screen_w * 4); continue; }
-                std::memset(line, 0, ox * 4);
-                std::memset(line + std::size_t(ox + dw) * 4, 0, std::size_t(screen_w - ox - dw) * 4);
-            }
-            if (xmap_.size() != dw || xmap_source_ != w) {
+            ox = (screen_w - dw) / 2; oy = (screen_h - dh) / 2;
+            src = reinterpret_cast<const std::uint32_t*>(image_->rgba->data());
+            linear = image_->smooth && dw * 2 == w * 3 && dh * 2 == h * 3; // HD missions: exact 3:2 linear
+            if (!linear && (xmap_.size() != dw || xmap_source_ != w)) {
                 xmap_.resize(dw);
                 for (unsigned x = 0; x < dw; ++x) xmap_[x] = unsigned(std::uint64_t(x) * w / dw);
                 xmap_source_ = w;
             }
-            const auto* src = reinterpret_cast<const std::uint32_t*>(image_->rgba->data());
-            if (image_->smooth && dw * 2 == w * 3 && dh * 2 == h * 3) { // HD missions: exact 3:2 linear
-                linear_3_2(src, w, h, base, stride, ox, oy);
-                framebufferEnd(&fb_);
-                return;
-            }
-            unsigned previous = ~0u;
-            for (unsigned y = 0; y < dh; ++y) {
-                const unsigned sy = unsigned(std::uint64_t(y) * h / dh);
-                auto* row = reinterpret_cast<std::uint32_t*>(base + std::size_t(oy + y) * stride) + ox;
-                if (sy == previous) { // repeated source row: copy the line above
-                    std::memcpy(row, reinterpret_cast<std::uint32_t*>(base + std::size_t(oy + y - 1) * stride) + ox,
-                                std::size_t(dw) * 4);
+            if (linear) { widened_[0].resize(dw); widened_[1].resize(dw); cached_[0] = cached_[1] = ~0u; }
+        }
+        unsigned previous = ~0u; // nearest: the source row of the line above
+        for (unsigned y0 = 0; y0 < screen_h; y0 += 8) {
+            for (unsigned k = 0; k < 8; ++k) {
+                const unsigned y = y0 + k;
+                std::uint32_t* line = strip_ + std::size_t(k) * screen_w;
+                if (!shown || y < oy || y >= oy + dh) {
+                    std::memset(line, 0, screen_w * 4); previous = ~0u; continue;
+                }
+                std::memset(line, 0, ox * 4);
+                std::memset(line + ox + dw, 0, std::size_t(screen_w - ox - dw) * 4);
+                std::uint32_t* out = line + ox;
+                const unsigned ly = y - oy;
+                if (linear) {
+                    // Three output lines for every two source lines: the outer ones are the
+                    // widened source lines, the middle one their mean.
+                    const unsigned q = ly / 3, r = ly % 3;
+                    if (r == 1) {
+                        const std::uint32_t* a = widened(src, w, 2 * q, 0);
+                        const std::uint32_t* b = widened(src, w, 2 * q + 1, 1);
+                        for (unsigned x = 0; x < dw; ++x) out[x] = mean(a[x], b[x]);
+                    } else {
+                        const std::uint32_t* a = widened(src, w, 2 * q + (r == 2), r == 2);
+                        std::memcpy(out, a, std::size_t(dw) * 4);
+                    }
+                    continue;
+                }
+                const unsigned sy = unsigned(std::uint64_t(ly) * h / dh);
+                if (sy == previous && k) { // repeated source row: copy the line above
+                    std::memcpy(out, line - screen_w + ox, std::size_t(dw) * 4);
                     continue;
                 }
                 previous = sy;
                 const auto* in = src + std::size_t(sy) * w;
-                for (unsigned x = 0; x < dw; ++x) row[x] = in[xmap_[x]] | 0xff000000u; // RGBA32, opaque
+                for (unsigned x = 0; x < dw; ++x) out[x] = in[xmap_[x]] | 0xff000000u; // RGBA32, opaque
             }
+            swizzle(base, stride, y0);
         }
         framebufferEnd(&fb_);
     }
 private:
-    // Three output pixels for every two source pixels, both ways: the outer ones copy
-    // their source pixel, the middle one averages its two neighbours.
     static std::uint32_t mean(std::uint32_t a, std::uint32_t b) { return ((a & 0xfefefefeu) >> 1) + ((b & 0xfefefefeu) >> 1); }
-    static void linear_3_2(const std::uint32_t* src, unsigned w, unsigned h, std::uint8_t* base, u32 stride,
-                           unsigned ox, unsigned oy) {
-        auto row = [&](unsigned y) { return reinterpret_cast<std::uint32_t*>(base + std::size_t(oy + y) * stride) + ox; };
-        auto widen = [&](const std::uint32_t* in, std::uint32_t* out) {
-            for (unsigned x = 0; x + 1 < w; x += 2) {
-                const std::uint32_t a = in[x] | 0xff000000u, b = in[x + 1] | 0xff000000u;
-                out[0] = a; out[1] = mean(a, b); out[2] = b; out += 3;
+    // Source line sy widened 2 -> 3 (outer pixels copied, the middle one their mean), cached per slot.
+    const std::uint32_t* widened(const std::uint32_t* src, unsigned w, unsigned sy, unsigned slot) {
+        std::uint32_t* out = widened_[slot].data();
+        if (cached_[slot] == sy) return out;
+        cached_[slot] = sy;
+        const std::uint32_t* in = src + std::size_t(sy) * w;
+        for (unsigned x = 0; x + 1 < w; x += 2) {
+            const std::uint32_t a = in[x] | 0xff000000u, b = in[x + 1] | 0xff000000u;
+            out[0] = a; out[1] = mean(a, b); out[2] = b; out += 3;
+        }
+        return widened_[slot].data();
+    }
+    // The 8 strip lines into their GOB row of the block-linear framebuffer: GOBs are
+    // 64 bytes x 8 lines, 16 GOBs tall per block, 16-byte units in 16Bx2 order (libnx
+    // framebuffer.c, _convertToBlocklinear).
+    void swizzle(std::uint8_t* base, u32 stride, unsigned y0) const {
+        const unsigned columns = stride / 64, block = y0 / 128, gob_y = (y0 / 8) % 16;
+        const auto* in = reinterpret_cast<const std::uint8_t*>(strip_);
+        for (unsigned column = 0; column < columns; ++column) {
+            auto* gob = base + ((std::size_t(block) * columns + column) * 16 + gob_y) * 512;
+            const std::uint8_t* at = in + column * 64;
+            for (unsigned i = 0; i < 32; ++i) {
+                const unsigned y = ((i >> 1) & 6) | (i & 1), x = ((i << 3) & 0x10) | ((i << 1) & 0x20);
+                std::memcpy(gob + i * 16, at + y * screen_w * 4 + x, 16);
             }
-        };
-        const unsigned dw = w * 3 / 2;
-        for (unsigned y = 0; y + 1 < h; y += 2) {
-            std::uint32_t* top = row(y / 2 * 3);
-            std::uint32_t* middle = row(y / 2 * 3 + 1);
-            std::uint32_t* bottom = row(y / 2 * 3 + 2);
-            widen(src + std::size_t(y) * w, top);
-            widen(src + std::size_t(y + 1) * w, bottom);
-            for (unsigned x = 0; x < dw; ++x) middle[x] = mean(top[x], bottom[x]);
         }
     }
     Framebuffer fb_{};
@@ -228,9 +252,11 @@ private:
     std::optional<Native::Upload> image_;
     std::vector<unsigned> xmap_;
     unsigned xmap_source_ = 0;
+    std::vector<std::uint32_t> widened_[2];
+    unsigned cached_[2] = {~0u, ~0u};
+    alignas(64) std::uint32_t strip_[8 * screen_w] = {};
 };
 
-// Switch button -> shell action (N64 layout: A/B as on the original pad).
 struct ButtonBinding { u64 button; const char* action; };
 constexpr std::array<ButtonBinding, 12> button_bindings = {{
     {HidNpadButton_A, "a"}, {HidNpadButton_B, "b"}, {HidNpadButton_Plus, "start"},
