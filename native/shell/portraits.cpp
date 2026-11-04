@@ -11,6 +11,9 @@ extern "C" {
 #include <libswscale/swscale.h>
 }
 #include <algorithm>
+#include <cstdint>
+#include <deque>
+#include <condition_variable>
 #include <atomic>
 #include <chrono>
 #include <cstring>
@@ -33,13 +36,21 @@ constexpr double fidget_min = 3.0, fidget_max = 8.0;
 
 // A decoded video: frames of packed RGBA (r | g << 8 | b << 16 | a << 24).
 struct Clip { unsigned width = 0, height = 0; double fps = 15; std::vector<std::vector<std::uint32_t>> frames; };
-struct Portrait { std::vector<Clip> idle, talk; bool alias = false; }; // alias: same videos as an earlier one
+// Videos are decoded when the portrait first shows (the first idle frame, for
+// matching, at start): all of them would hold ~70 MB of frames.
+struct Portrait {
+    std::vector<std::string> idle_files, talk_files;
+    Clip reference;              // the first idle video's first frame
+    std::vector<Clip> idle, talk;
+    bool alias = false;          // same videos as an earlier portrait
+    bool requested = false, loaded = false;
+};
 
 std::string root;
 std::vector<Portrait> portraits; // by portdata.dat index; filled by the loader
 std::atomic<bool> ready{false};
 
-Clip decode(const std::string& path) {
+Clip decode(const std::string& path, std::size_t max_frames = SIZE_MAX) {
     Clip clip;
     AVFormatContext* format = nullptr;
     // "sdmc:/..." would otherwise be taken for an FFmpeg protocol name.
@@ -74,7 +85,7 @@ Clip decode(const std::string& path) {
         }
     };
     if (context && packet && frame) {
-        while (av_read_frame(format, packet) >= 0) {
+        while (clip.frames.size() < max_frames && av_read_frame(format, packet) >= 0) {
             if (packet->stream_index == stream && avcodec_send_packet(context, packet) >= 0) receive();
             av_packet_unref(packet);
         }
@@ -89,6 +100,10 @@ Clip decode(const std::string& path) {
     return clip;
 }
 
+std::mutex mutex;
+std::condition_variable requested;
+std::deque<int> requests; // portraits to decode, from apply()
+
 void load() {
     std::ifstream file(root + "/portrait/index.json");
     if (!file) return;
@@ -96,27 +111,44 @@ void load() {
     try { index = nlohmann::json::parse(file); } catch (const std::exception&) { return; }
     std::vector<Portrait> loaded;
     std::set<std::string> first_idle; // portdata lists some portraits twice
-    unsigned clips = 0;
+    unsigned references = 0;
     for (const auto& entry : index) {
         Portrait portrait;
-        const auto idle = entry.value("idle", nlohmann::json::array());
-        if (!idle.empty() && !first_idle.insert(idle.front().get<std::string>()).second) {
-            portrait.alias = true;
-            loaded.push_back(std::move(portrait));
-            continue;
+        for (const auto& name : entry.value("idle", nlohmann::json::array())) portrait.idle_files.push_back(root + "/" + name.get<std::string>());
+        for (const auto& name : entry.value("talk", nlohmann::json::array())) portrait.talk_files.push_back(root + "/" + name.get<std::string>());
+        if (!portrait.idle_files.empty() && !first_idle.insert(portrait.idle_files.front()).second) portrait.alias = true;
+        else if (!portrait.idle_files.empty()) {
+            portrait.reference = decode(portrait.idle_files.front(), 1);
+            references += !portrait.reference.frames.empty();
         }
-        for (const auto& [kind, list] : {std::pair{"idle", &portrait.idle}, std::pair{"talk", &portrait.talk}})
-            for (const auto& name : entry.value(kind, nlohmann::json::array())) {
-                Clip clip = decode(root + "/" + name.get<std::string>());
-                if (clip.frames.empty()) continue;
-                list->push_back(std::move(clip));
-                ++clips;
-            }
         loaded.push_back(std::move(portrait));
     }
-    portraits = std::move(loaded);
-    ready.store(clips > 0, std::memory_order_release);
-    sc64::shell::log::info("portraits: %zu PC portraits, %u videos", portraits.size(), clips);
+    {
+        std::lock_guard lock(mutex);
+        portraits = std::move(loaded);
+    }
+    ready.store(references > 0, std::memory_order_release);
+    sc64::shell::log::info("portraits: %zu PC portraits", portraits.size());
+    for (;;) { // then the videos of each portrait as it first shows
+        int p;
+        std::vector<std::string> idle_files, talk_files;
+        {
+            std::unique_lock lock(mutex);
+            requested.wait(lock, [] { return !requests.empty(); });
+            p = requests.front();
+            requests.pop_front();
+            idle_files = portraits[std::size_t(p)].idle_files;
+            talk_files = portraits[std::size_t(p)].talk_files;
+        }
+        std::vector<Clip> idle, talk;
+        for (const auto& name : idle_files) if (auto clip = decode(name); !clip.frames.empty()) idle.push_back(std::move(clip));
+        for (const auto& name : talk_files) if (auto clip = decode(name); !clip.frames.empty()) talk.push_back(std::move(clip));
+        std::lock_guard lock(mutex);
+        auto& portrait = portraits[std::size_t(p)];
+        portrait.idle = std::move(idle);
+        portrait.talk = std::move(talk);
+        portrait.loaded = !portrait.idle.empty();
+    }
 }
 
 // The PC portrait a still N64 one shows (by its first idle frame), the column the
@@ -128,8 +160,8 @@ Match identify(const gfx::Texture& tex) {
     double best_difference = 1e9, runner_up = 1e9; // runner_up: the best of the other portraits
     for (std::size_t p = 0; p < portraits.size(); ++p) {
         double portrait_best = 1e9;
-        if (portraits[p].idle.empty() || portraits[p].alias) continue;
-        const Clip& clip = portraits[p].idle.front();
+        if (portraits[p].reference.frames.empty() || portraits[p].alias) continue;
+        const Clip& clip = portraits[p].reference;
         if (clip.height != n64_height || clip.width > n64_width) continue;
         const auto& reference = clip.frames.front();
         for (bool mirrored : {false, true})
@@ -163,7 +195,6 @@ struct Playing {
     const Clip* clip = nullptr;
     Clock::time_point started{}, next_fidget{};
 };
-std::mutex mutex;
 std::unordered_map<std::uint64_t, Match> matches; // by N64 texture key
 Playing playing;
 std::mt19937 random_engine{0x5c64};
@@ -244,6 +275,15 @@ void apply(gfx::DrawList& list) {
         }
         Match match = found->second;
         if (!match.matched) continue;
+        auto& portrait = portraits[std::size_t(match.portrait)];
+        if (!portrait.loaded) { // the N64 portrait until its videos are decoded
+            if (!portrait.requested) {
+                portrait.requested = true;
+                requests.push_back(match.portrait);
+                requested.notify_one();
+            }
+            continue;
+        }
         unsigned width = 0;
         std::uint64_t id = 0;
         const auto* pixels = current(match.portrait, width, id);
