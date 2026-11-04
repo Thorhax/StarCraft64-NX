@@ -29,6 +29,10 @@ constexpr float fade_step = 1.0f / (output_rate * 0.35f); // 350 ms fades
 // title's level (RMS, before the shell's game gain). The PC track plays at that
 // level and follows the guest's volume (options, fades) proportionally.
 constexpr float reference_volume = 31334.0f / 65536.0f, reference_gain = 0.25f;
+// The PC tracks are mastered near full scale (Vorbis peaks up to ~1.12): at the
+// default game gain (4) they play at 0.85 so their peaks stay below the output's
+// safety limiter instead of being bent or clipped.
+constexpr float headroom = 0.85f;
 
 enum class Kind : std::uint8_t { title, theme, jingle };
 enum Race : std::uint8_t { none, terran, zerg, protoss };
@@ -308,15 +312,15 @@ bool guest_voice(std::uint32_t rom, std::int32_t left, std::int32_t right) {
 void mix(float* stereo, unsigned frames, float game_gain) {
     if (!enabled) return;
     std::lock_guard lock(ring_mutex);
-    const float target_gain = guest_gain.load(std::memory_order_relaxed) * game_gain;
+    const float target_gain = guest_gain.load(std::memory_order_relaxed) * game_gain * headroom;
     const bool out = fading_out.load(std::memory_order_relaxed);
     for (unsigned f = 0; f < frames; ++f) {
         if (!ring_size) { fade = 0; break; }
         fade = out ? std::max(0.0f, fade - fade_step) : std::min(1.0f, fade + fade_step);
         gain += (target_gain - gain) * 0.0005f; // follows guest fades and volume changes
         const float g = fade * gain;
-        stereo[f * 2] = std::clamp(stereo[f * 2] + ring[ring_read * 2] * g, -1.0f, 1.0f);
-        stereo[f * 2 + 1] = std::clamp(stereo[f * 2 + 1] + ring[ring_read * 2 + 1] * g, -1.0f, 1.0f);
+        stereo[f * 2] += ring[ring_read * 2] * g; // the output limits the whole mix
+        stereo[f * 2 + 1] += ring[ring_read * 2 + 1] * g;
         ring_read = (ring_read + 1) % ring_frames;
         --ring_size;
     }

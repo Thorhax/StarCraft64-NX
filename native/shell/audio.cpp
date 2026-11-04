@@ -115,17 +115,20 @@ void retire() {
 }
 std::atomic<float> game_gain{1.0f};
 void mix_sources(float* dst, ma_uint32 frames);
-// The game's own PCM is mixed far below the PC voices and movies, so only it is
-// amplified (mix_sources). Above the knee a soft limiter bends peaks of the
-// whole mix toward full scale instead of clipping them.
-void mix(float* dst, ma_uint32 frames) {
-    mix_sources(dst, frames);
-    if (game_gain.load(std::memory_order_relaxed) == 1.0f) return;
-    constexpr float knee = 0.7f;
-    for (std::size_t i = 0; i < std::size_t(frames) * 2; ++i) {
+// Above the knee, bends peaks toward full scale instead of clipping them.
+void soft_limit(float* dst, std::size_t samples, float knee) {
+    for (std::size_t i = 0; i < samples; ++i) {
         const float x = dst[i], magnitude = std::fabs(x);
         if (magnitude > knee) dst[i] = std::copysign(knee + (1 - knee) * std::tanh((magnitude - knee) / (1 - knee)), x);
     }
+}
+// The game's own PCM is mixed far below the PC voices and movies, so only it is
+// amplified, and limited from 0.7 of full scale, in mix_sources; the PC music,
+// voices and movies are added after it untouched. The whole mix is only kept from
+// clipping, above 0.95.
+void mix(float* dst, ma_uint32 frames) {
+    mix_sources(dst, frames);
+    soft_limit(dst, std::size_t(frames) * 2, 0.95f);
 }
 void mix_sources(float* dst, ma_uint32 frames) {
     std::fill_n(dst, frames * 2, 0.0f);
@@ -156,8 +159,10 @@ void mix_sources(float* dst, ma_uint32 frames) {
     const auto field = session().fields.load();
     if (tracing(field)) output_trace.append({field,applied_stream,trace_seconds(),pcm.correction(),
         0,0,48000,result.played,result.starved},frames,[&](std::size_t i) { return dst[i]; });
-    if (const float gain = game_gain.load(std::memory_order_relaxed); gain != 1.0f)
+    if (const float gain = game_gain.load(std::memory_order_relaxed); gain != 1.0f) {
         for (std::size_t i = 0; i < std::size_t(frames) * 2; ++i) dst[i] *= gain;
+        soft_limit(dst, std::size_t(frames) * 2, 0.7f);
+    }
     if (result.starved) ++underrun_count;
     if (result.waiting) ++wait_count;
     played_count += result.played; nonzero_count += result.nonzero;

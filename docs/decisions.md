@@ -2110,3 +2110,22 @@ animation speed they have at 30 (briefings stay at 30 rather than dipping to 27-
 when a frame ran long); the boot animation and title likewise. With the widescreen
 fix of the boot cinematic (research.md, `0x80064580`), the PC opening movies also
 play in widescreen again: their detection needs the cinematic's original VI scale.
+
+## ADR-087 — Only the amplified N64 audio is limited (ACCEPTED)
+
+**Context:** The game's PCM is amplified by the volume factor (default 4) because
+the N64 mix is quiet, and a soft limiter from 0.7 of full scale kept the result
+from clipping. It ran on the whole mix: the PC soundtrack (ADR-081), which plays
+at its mastered level at the default factor and peaks up to ~1.12 after Vorbis
+encoding, was also clamped and bent above 0.7 (about 1% of its samples altered,
+distortion ~42 dB below the music), as were the voices and movies.
+
+**Decision:** The 0.7 limiter applies to the amplified game PCM only, where it is
+amplified. The PC music plays at 0.85 of its former level (peaks ~0.95) and is
+added unclamped, then the voices; the whole mix only gets a soft limit above
+0.95 against clipping when loud effects meet loud music.
+
+**Consequences:** The PC tracks reach the output unaltered (simulated over the
+title, Zerg, victory and Brood War Terran tracks: no sample changed), 1.4 dB
+quieter relative to the effects than before.
+
