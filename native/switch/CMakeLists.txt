@@ -65,6 +65,10 @@ target_link_libraries(sc64_scripts PUBLIC sc64_input)
       SC64_PRIVATE_ROOT="sdmc:/switch/StarCraft64"
       MA_ENABLE_ONLY_SPECIFIC_BACKENDS MA_ENABLE_NULL MA_NO_RUNTIME_LINKING)
   target_link_libraries(sc64_shell PUBLIC sc64_game sc64_gfx_core sc64_scripts librecomp ultramodern Threads::Threads)
+# HD composition and the framebuffer scaling are per-pixel loops: -O3 lets GCC
+# vectorize them (gfx_optimize.cmake gives the renderer the same).
+set_source_files_properties(${SC64_ROOT}/native/shell/hd.cpp ${CMAKE_CURRENT_SOURCE_DIR}/app.cpp
+    PROPERTIES COMPILE_OPTIONS "$<$<CONFIG:RelWithDebInfo,Release>:-O3>")
 # Voiced briefings (native/shell/voices.cpp).
 target_sources(sc64_shell PRIVATE ${SC64_ROOT}/native/shell/voices.cpp)
 target_compile_definitions(sc64_shell PRIVATE SC64_VOICES=1)

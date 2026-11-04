@@ -56,6 +56,11 @@ void sc64_platform_heavy_begin() {
 void sc64_platform_heavy_end() { svcSetThreadCoreMask(CUR_THREAD_HANDLE, 0, 1u << 0); }
 // Below the shell (0x2C) and graphics (0x2D) threads: it uses core 0's idle time only,
 // so presentation keeps its pace; the guest copies whatever the helper has not taken.
+double sc64_platform_thread_cpu_ms() {
+    u64 ticks = 0;
+    svcGetInfo(&ticks, InfoType_ThreadTickCount, CUR_THREAD_HANDLE, -1); // this thread, all cores
+    return double(armTicksToNs(ticks)) / 1e6;
+}
 void sc64_platform_helper_core() {
     svcSetThreadCoreMask(CUR_THREAD_HANDLE, 0, 1u << 0);
     svcSetThreadPriority(CUR_THREAD_HANDLE, 0x2E);

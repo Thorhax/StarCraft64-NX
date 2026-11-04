@@ -435,7 +435,7 @@ constexpr std::uint32_t scratch_size = 256 * 1024;
 std::uint64_t images_drawn = 0, frames_taken = 0;
 // Time spent per part, logged every 1800 frames taken.
 using Clock = std::chrono::steady_clock;
-double terrain_ms = 0, image_ms = 0, take_ms = 0, fill_ms = 0, compose_ms = 0;
+double terrain_ms = 0, image_ms = 0, take_ms = 0, fill_ms = 0, compose_ms = 0, compose_cpu_ms = 0;
 std::uint64_t composed = 0, fallbacks = 0;
 // hdverify (next to the hd folder): every native image is also drawn by the game's
 // function and the two compared; differences are logged.
@@ -596,11 +596,11 @@ Frames fill(const std::uint8_t* rdram, std::vector<Taken>&& taken) {
     fill_ms += since(started);
     frames_taken += out.size();
     if (frames_taken % 1800 < out.size())
-        sc64::shell::log::info("hd ms/frame: terrain %.2f images %.2f take %.2f fill %.2f compose %.2f (%.2f per image, %llu) | %.1f images per frame, %llu N64 fallbacks",
+        sc64::shell::log::info("hd ms/frame: terrain %.2f images %.2f take %.2f fill %.2f compose %.2f (%.2f per image, %.2f CPU, %llu) | %.1f images per frame, %llu N64 fallbacks",
             terrain_ms / 1800, image_ms / 1800, take_ms / 1800, fill_ms / 1800, compose_ms / 1800,
-            composed ? compose_ms / double(composed) : 0.0, (unsigned long long)composed, double(images_drawn) / 1800,
-            (unsigned long long)fallbacks),
-        terrain_ms = image_ms = take_ms = fill_ms = compose_ms = 0, images_drawn = 0, composed = 0;
+            composed ? compose_ms / double(composed) : 0.0, composed ? compose_cpu_ms / double(composed) : 0.0,
+            (unsigned long long)composed, double(images_drawn) / 1800, (unsigned long long)fallbacks),
+        terrain_ms = image_ms = take_ms = fill_ms = compose_ms = compose_cpu_ms = 0, images_drawn = 0, composed = 0;
     return out;
 }
 
@@ -623,6 +623,7 @@ std::optional<std::vector<std::uint8_t>> compose(const gfx::DrawList& list, cons
     const std::size_t canvas_bytes = std::size_t(frame->canvas_width) * frame->canvas_height;
     if (frame->canvas + canvas_bytes > list.initial_ram.size()) return std::nullopt;
     const auto started = Clock::now();
+    const double cpu_started = sc64_platform_thread_cpu_ms();
     std::uint64_t hash = 14695981039346656037ull;
     const std::uint8_t* canvas = list.initial_ram.data() + frame->canvas;
     for (std::size_t i = 0; i + 4 <= canvas_bytes; i += 4)
@@ -674,20 +675,22 @@ std::optional<std::vector<std::uint8_t>> compose(const gfx::DrawList& list, cons
     thread_local std::vector<std::int16_t> alpha;
     alpha.assign(std::size_t(w) * h, -1);
     const int pc[3] = {fog_r, fog_g, fog_b};
+    // Columns inside the background and the canvas, the same for every row.
+    const int xa = std::max({0, bounds.x0, x0 - s0}), xb = std::min({int(w), bounds.x1, int(frame->canvas_width) - s0 + x0,
+                                                                   int(tex.width) - s0 + x0});
     for (unsigned y = 0; y < h; ++y) {
         const int v = t0 + int(y) - y0;
         if (int(y) < bounds.y0 || int(y) >= bounds.y1 || v < 0 || v >= int(frame->canvas_height) || v >= int(tex.height))
             continue;
-        const std::uint8_t* row = canvas + std::size_t(v) * frame->canvas_width;
-        for (unsigned x = 0; x < w; ++x) {
-            const int u = s0 + int(x) - x0;
-            if (int(x) < bounds.x0 || int(x) >= bounds.x1 || u < 0 || u >= int(frame->canvas_width) || u >= int(tex.width))
-                continue;
-            const std::uint32_t pixel = in[std::size_t(y) * w + x] | 0xff000000u, b = palette[row[u]];
-            std::int16_t& a = alpha[std::size_t(y) * w + x];
-            if (pixel == b) { a = 0; continue; }
-            if (overlay[std::size_t(y) * w + x]) continue;
-            if (pixel == fog_pixel) { a = 256; continue; }
+        const std::uint8_t* row = canvas + std::size_t(v) * frame->canvas_width + (s0 - x0);
+        const std::uint32_t* drawn = in + std::size_t(y) * w;
+        const std::uint8_t* over = overlay.data() + std::size_t(y) * w;
+        std::int16_t* ar = alpha.data() + std::size_t(y) * w;
+        for (int x = xa; x < xb; ++x) {
+            const std::uint32_t pixel = drawn[x] | 0xff000000u, b = palette[row[x]];
+            if (pixel == b) { ar[x] = 0; continue; }
+            if (over[x]) continue;
+            if (pixel == fog_pixel) { ar[x] = 256; continue; }
             // The RDP blends the canvas toward the fog colour (fog of war, the map's
             // edges): solve for that blend; anything else was drawn over the canvas.
             const int bc[3] = {int(b & 255), int(b >> 8 & 255), int(b >> 16 & 255)};
@@ -698,30 +701,32 @@ std::optional<std::vector<std::uint8_t>> compose(const gfx::DrawList& list, cons
             const int value = std::abs(span) < 8 ? 256 : std::clamp((bc[k] - fc[k]) * 256 / span, 0, 256);
             bool fits = true;
             for (int c = 0; c < 3; ++c) fits &= std::abs((bc[c] - fc[c]) * 256 - value * (bc[c] - pc[c])) <= 12 * 256;
-            if (fits) a = std::int16_t(value);
+            if (fits) ar[x] = std::int16_t(value);
         }
     }
     // Pass 2: the RDP dithers the fog; a 3x3 average over the blended pixels
-    // smooths its edges at twice the resolution. Row sums of three, then three rows;
-    // flat marks pixels whose whole neighbourhood has their alpha (no blending needed).
+    // smooths its edges at twice the resolution: three-pixel row sums and counts,
+    // then three rows. flat marks pixels whose whole neighbourhood has their alpha
+    // (no blending needed). Branch-free so it vectorizes; the average is
+    // sum * ceil(65536 / count) >> 16 (= sum / count), 7282 for a full neighbourhood,
+    // and the rare partial ones are fixed after.
     const unsigned pw = w + 2;
-    thread_local std::vector<std::int32_t> row_sums, row_counts;
-    thread_local std::vector<std::int16_t> smooth;
-    thread_local std::vector<std::uint8_t> flat;
+    thread_local std::vector<std::int16_t> row_sums, smooth;
+    thread_local std::vector<std::uint8_t> row_counts, flat;
     row_sums.assign(std::size_t(pw) * (h + 2), 0); row_counts.assign(std::size_t(pw) * (h + 2), 0);
     smooth.assign(std::size_t(pw) * (h + 2), -1); flat.assign(std::size_t(w) * h, 0);
     for (unsigned y = 0; y < h; ++y) {
         const std::int16_t* ar = alpha.data() + std::size_t(y) * w;
-        std::int32_t* rs = row_sums.data() + std::size_t(y + 1) * pw + 1;
-        std::int32_t* rc = row_counts.data() + std::size_t(y + 1) * pw + 1;
+        std::int16_t* rs = row_sums.data() + std::size_t(y + 1) * pw + 1;
+        std::uint8_t* rc = row_counts.data() + std::size_t(y + 1) * pw + 1;
+        for (unsigned x = 0; x < w; ++x) { rs[x] = std::int16_t(std::max<int>(ar[x], 0)); rc[x] = ar[x] >= 0; }
+        int previous_sum = 0, previous_count = 0; // the pixel left of x, before x is overwritten
         for (unsigned x = 0; x < w; ++x) {
-            int sum = 0, count = 0;
-            for (int dx = -1; dx <= 1; ++dx) {
-                const int nx = int(x) + dx;
-                if (nx < 0 || nx >= int(w) || ar[nx] < 0) continue;
-                sum += ar[nx]; ++count;
-            }
-            rs[x] = sum; rc[x] = count;
+            const int here_sum = rs[x], here_count = rc[x];
+            const int next_sum = x + 1 < w ? std::max<int>(ar[x + 1], 0) : 0, next_count = x + 1 < w && ar[x + 1] >= 0;
+            rs[x] = std::int16_t(previous_sum + here_sum + next_sum);
+            rc[x] = std::uint8_t(previous_count + here_count + next_count);
+            previous_sum = here_sum; previous_count = here_count;
         }
     }
     static const std::array<std::int32_t, 10> reciprocal = [] {
@@ -731,19 +736,28 @@ std::optional<std::vector<std::uint8_t>> compose(const gfx::DrawList& list, cons
     }();
     for (unsigned y = 0; y < h; ++y) {
         const std::int16_t* ar = alpha.data() + std::size_t(y) * w;
-        const std::int32_t* s0r = row_sums.data() + std::size_t(y) * pw + 1;
-        const std::int32_t* c0r = row_counts.data() + std::size_t(y) * pw + 1;
+        const std::int16_t* s0r = row_sums.data() + std::size_t(y) * pw + 1;
+        const std::uint8_t* c0r = row_counts.data() + std::size_t(y) * pw + 1;
         std::int16_t* out_s = smooth.data() + std::size_t(y + 1) * pw + 1;
         std::uint8_t* out_f = flat.data() + std::size_t(y) * w;
         for (unsigned x = 0; x < w; ++x) {
-            const int a = ar[x];
-            if (a < 0) continue;
-            const int sum = s0r[x] + s0r[x + pw] + s0r[x + 2 * pw], count = c0r[x] + c0r[x + pw] + c0r[x + 2 * pw];
-            out_s[x] = std::int16_t((std::int64_t(sum) * reciprocal[std::size_t(count)]) >> 16);
-            out_f[x] = count == 9 && sum == 9 * a;
+            const std::int16_t a = ar[x];
+            const std::uint16_t sum = std::uint16_t(s0r[x] + s0r[x + pw] + s0r[x + 2 * pw]);
+            const std::uint8_t count = std::uint8_t(c0r[x] + c0r[x + pw] + c0r[x + 2 * pw]);
+            out_s[x] = a < 0 ? std::int16_t(-1) : std::int16_t((std::uint32_t(sum) * 7282u) >> 16);
+            out_f[x] = (count == 9) & (sum == 9 * a);
+        }
+        for (unsigned x = 0; x < w; ++x) {
+            const int count = c0r[x] + c0r[x + pw] + c0r[x + 2 * pw];
+            if (count == 9 || ar[x] < 0) continue;
+            const int sum = s0r[x] + s0r[x + pw] + s0r[x + 2 * pw];
+            out_s[x] = std::int16_t((sum * reciprocal[std::size_t(count)]) >> 16);
         }
     }
-    // Pass 3: each HD pixel with the alpha interpolated toward its neighbours.
+    // Pass 3: each HD pixel with the alpha interpolated toward its neighbours. The
+    // two HD rows under a canvas row are read in host byte order.
+    thread_local std::vector<std::uint8_t> hd_rows;
+    hd_rows.resize(std::size_t(fw) * 2);
     for (unsigned y = 0; y < h; ++y) {
         std::uint32_t* o0 = out + std::size_t(y) * 2 * ow;
         std::uint32_t* o1 = o0 + ow;
@@ -751,14 +765,19 @@ std::optional<std::vector<std::uint8_t>> compose(const gfx::DrawList& list, cons
         const int v = t0 + int(y) - y0;
         const std::int16_t* s = smooth.data() + std::size_t(y + 1) * pw + 1;
         const std::uint8_t* fl = flat.data() + std::size_t(y) * w;
+        const bool canvas_row = v >= 0 && v < int(frame->canvas_height);
+        if (canvas_row) {
+            const auto* src = reinterpret_cast<const std::uint32_t*>(frame->pixels.data() + std::size_t(v) * 2 * fw);
+            auto* dst = reinterpret_cast<std::uint32_t*>(hd_rows.data());
+            for (unsigned i = 0; i < fw * 2 / 4; ++i) dst[i] = __builtin_bswap32(src[i]);
+        }
+        const std::uint8_t* h0 = hd_rows.data() + std::ptrdiff_t(s0 - x0) * 2;
+        const std::uint8_t* h1 = h0 + fw;
         for (unsigned x = 0; x < w; ++x) {
             const std::uint32_t pixel = f[x] | 0xff000000u;
             const int a = s[x];
-            if (a < 0) { o0[2 * x] = o0[2 * x + 1] = o1[2 * x] = o1[2 * x + 1] = pixel; continue; }
-            const int u = s0 + int(x) - x0;
-            const std::size_t hd0 = std::size_t(v) * 2 * fw + unsigned(u) * 2, hd1 = hd0 + fw;
-            const std::uint8_t* hd = frame->pixels.data();
-            const std::uint8_t q[4] = {hd[hd0 ^ 3], hd[(hd0 + 1) ^ 3], hd[hd1 ^ 3], hd[(hd1 + 1) ^ 3]};
+            if (a < 0 || !canvas_row) { o0[2 * x] = o0[2 * x + 1] = o1[2 * x] = o1[2 * x + 1] = pixel; continue; }
+            const std::uint8_t q[4] = {h0[2 * x], h0[2 * x + 1], h1[2 * x], h1[2 * x + 1]};
             std::uint32_t* const o[4] = {&o0[2 * x], &o0[2 * x + 1], &o1[2 * x], &o1[2 * x + 1]};
             if (fl[x] && a == 0) { // clear of fog: the HD pixels as they are
                 for (int i = 0; i < 4; ++i) *o[i] = q[i] ? palette[q[i]] : pixel;
@@ -785,6 +804,7 @@ std::optional<std::vector<std::uint8_t>> compose(const gfx::DrawList& list, cons
     {
         std::lock_guard lock(mutex);
         compose_ms += since(started);
+        compose_cpu_ms += sc64_platform_thread_cpu_ms() - cpu_started;
         ++composed;
     }
     return bytes;

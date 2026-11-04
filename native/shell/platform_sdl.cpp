@@ -8,6 +8,7 @@
 #include "../runtime/rom_image.hpp"
 #include <SDL3/SDL.h>
 #include <atomic>
+#include <ctime>
 #include <mutex>
 #include <stdexcept>
 #include <thread>
@@ -167,3 +168,12 @@ bool sc64_platform_thread(void (*entry)()) {
 void sc64_platform_heavy_begin() {}
 void sc64_platform_heavy_end() {}
 void sc64_platform_helper_core() {}
+double sc64_platform_thread_cpu_ms() {
+#if defined(CLOCK_THREAD_CPUTIME_ID)
+    timespec now{};
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &now);
+    return double(now.tv_sec) * 1e3 + double(now.tv_nsec) / 1e6;
+#else
+    return 0;
+#endif
+}

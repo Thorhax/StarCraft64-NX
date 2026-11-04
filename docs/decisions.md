@@ -2027,6 +2027,10 @@ new, and the field is held while its image's HD composite is made.
 per task. Every finished frame is now shown once, in order: Wasteland 60 tasks
 and 60 distinct images per second standing, 57-59 scrolling (was 50-54 shown);
 the Zerg base 58.7 tasks, 58.6 shown (was 51-57 made and as few as 43 shown,
-with backward steps). A copy that only rewrites changed lines was
+with backward steps). The HD composition is built with -O3 (GCC vectorizes its passes only
+there), its column ranges are computed once per row and its 3×3 average is
+branch-free: 8.7 → 5.0 ms in Wasteland and 4.2 ms in the Zerg base on the
+Switch, byte-identical to the previous output (`hdverify` compared both over
+5,400 frames). A copy that only rewrites changed lines was
 measured slower on the Switch (3.0 ms: two read streams) and `-O3` for the
 generated code gave no measurable change; both were dropped.

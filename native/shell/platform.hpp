@@ -30,3 +30,5 @@ void sc64_platform_heavy_end();
 // Called by a helper the guest thread waits on (the snapshot copy): on Switch, core 0
 // below the shell and graphics threads (idle time only). No-op elsewhere.
 void sc64_platform_helper_core();
+// CPU time the calling thread has run, in milliseconds (for timing logs).
+double sc64_platform_thread_cpu_ms();

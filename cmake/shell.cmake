@@ -42,6 +42,9 @@ add_library(sc64_shell STATIC
     ${SC64_ROOT}/native/shell/platform_sdl.cpp
     ${SC64_ROOT}/native/runtime/flash_device.cpp ${SC64_ROOT}/native/runtime/ui_feedback.cpp
     ${SC64_ROOT}/native/shell/hd.cpp)
+# HD composition is a per-pixel loop: -O3 lets the compiler vectorize it.
+set_source_files_properties(${SC64_ROOT}/native/shell/hd.cpp
+    PROPERTIES COMPILE_OPTIONS "$<$<CONFIG:RelWithDebInfo,Release>:-O3>")
 target_include_directories(sc64_shell PUBLIC "${SC64_ROOT}/native/shell" "${SC64_ROOT}/native/runtime"
     "${SC64_TOOLCHAINS}")
 target_compile_definitions(sc64_shell PUBLIC SC64_SDL_VERSION="3.4.18")
