@@ -4,6 +4,14 @@ Historical and current status of the staged plan. The stage gates, accepted
 scopes and evidence are in [the implementation plan](implementation-plan.md); this page
 keeps the narrative summary that used to open the README.
 
+**Switch port, v1.5 (2026-11-05):** missions at 60 fps (widescreen and HD
+included, also while scrolling and in a 7-minute 1v4 battle), menus and
+briefings held at 30 fps, on 3 cores at stock clocks; PC graphics, music,
+cinematics, voices and animated portraits from the user's own PC files;
+USB keyboard and mouse with the PC hotkeys. See the README's Status section and
+ADR-081 to ADR-093 in [decisions.md](decisions.md). The rest of this page is
+the history of the staged plan.
+
 **Stages 0–5 closed for their documented scopes.** Stages 0–4 use the
 accepted macOS desktop baseline; Stage 5 closes the personal Android profile
 on 2026-10-09 (ADR-055). See [Stage 5 acceptance](stage5-acceptance.md).

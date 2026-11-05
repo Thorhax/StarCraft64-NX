@@ -57,13 +57,16 @@ manifest, engine GPU backend, per-platform prebuilt `lib/` folders) is obsolete.
 ```
 native/
   gfx_core/        # S2DEX2/TMEM/software rasterizer; no platform API
-  runtime/         # Flash, VI/FPU helpers, UI observers, SHA-1/SHA-256
+  runtime/         # Flash, VI/FPU helpers, UI observers, widescreen, PC hotkey tables, SHA-1/SHA-256
   host/            # Stage 1 capture host (own runtime copy)
-  shell/           # SDL3 app, session, audio, presentation, scripts, platform
-    input/         # SDL-free pointer/controller adapters
+  shell/           # SDL3 app, session, audio, presentation, scripts, platform;
+                   # PC assets: hd (HD missions), portraits, music, voices, movie
+    input/         # SDL-free pointer/controller/keyboard adapters (gestures, hotkeys, minimap)
+  switch/          # libnx shell (framebuffer video, HID pads/touch/keyboard/mouse), GL raster
   android/         # NDK profile, manifest, platform JNI, Java activity/haptics
 cmake/             # shell.cmake, toolchains/{mingw-w64,linux}-x86_64.cmake
-tools/             # research, recompile, renderer, desktop, input, android
+tools/             # research, recompile, renderer, desktop, input, android, switch,
+                   # PC asset extractors (voices, music, hd)
 tests/             # Python tool tests; native/ C++ fixtures
 local/             # ignored: toolchains, deps, generated, build, dist, reports, private
 third_party/       # ignored pinned source checkouts

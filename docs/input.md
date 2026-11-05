@@ -67,7 +67,7 @@ for the handoff, local-build risks and device acceptance checklist.
 
 | Input | Original controller action |
 |---|---|
-| Move mouse over game image | Steer original cursor toward mouse position |
+| Move mouse over game image | Original cursor placed at the mouse position (cursor warp, ADR-091; was stick steering, ADR-066) |
 | Left click / short one-finger tap | Reach point, then A (select/activate) |
 | Double one-finger tap / double left click on the map | Coalesce touches, reach point, then one B (contextual order) |
 | Right click / short two-finger tap | Reach point, then B (contextual order) |

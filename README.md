@@ -34,6 +34,25 @@ Their full commit history is kept in this repository. Thank you both.
   race themes one after another (as on PC), victories and defeats the PC
   jingles. The game's music volume and fades still apply. From your own CDs
   (section 10).
+- **Animated briefing portraits** (optional, with the HD graphics): the
+  speaker's portrait plays the PC talking animation while the voice plays and
+  its idle animations otherwise.
+- **60 fps missions, steady menus**: missions run at 60 fps, widescreen and HD
+  included, also while scrolling and in large battles; menus and briefings are
+  held at a steady 30 fps (their animations advance once per frame, as on the
+  N64). The intro movies play full screen at their own rate. See
+  [Status](#status).
+- **USB keyboard and mouse, PC style**: the mouse drives the cursor instantly
+  (left click selects, right click orders, minimap clicks move the camera),
+  edge and arrow-key scrolling, the PC command hotkeys (select an SCV, then
+  **B**, **B** builds a Barracks; select a Barracks, then **M** trains a Marine;
+  letters come from your own PC files), control groups (**Ctrl+1-4** assign,
+  **1-4** select; the N64 has four groups) and **F10** for the menu. Controller
+  and touch controls are unchanged. See [docs/input.md](docs/input.md).
+- **Fixes**: the PC music plays at its own level (only the N64 sounds are
+  amplified); the N64-only texts (the two training missions, secret missions)
+  no longer pick up unrelated PC voice lines; the widescreen intro is drawn at
+  the right width.
 
 ## What's new in v1.4
 
@@ -61,14 +80,21 @@ Their full commit history is kept in this repository. Thank you both.
 ## Status
 
 Fully playable, with a GPU renderer and the work spread over the CPU cores.
-Measured on a Switch launched as a Sphaira 4-core forwarder:
+Measured on a Switch at stock clocks, launched through the hbmenu title
+takeover (3 cores), widescreen and HD graphics on:
 
-| Screen | Resolution | v0.5 (CPU renderer) | v1.2 (GPU renderer) |
-|---|---|---|---|
-| Missions | 320×240 | ~22 fps | ~27 fps (the original game caps at 30) |
-| Main menu | 640×480 | ~22 fps | ~26 fps |
-| Briefings | 640×480 | ~13 fps | ~17 fps |
-| Intro | 640×480 | ~50 fps | ~50 fps |
+| Screen | v1.2 (gabryboy12-ai) | v1.5 |
+|---|---|---|
+| Missions (Zerg base) | ~27 fps | 59.4-60 fps |
+| Missions, scrolling across the map | — | 59.6-60 fps |
+| 7-minute 1v4 battle | — | 59.9 fps on average (lowest 59.4) |
+| Main menu, briefings | ~17-26 fps | 30 fps (held there on purpose) |
+
+The game thread uses about 2.5 ms of each 16.7 ms frame, so large battles
+have plenty of headroom. A 4-core forwarder (section 7a) adds a core for the HD
+composition and the framebuffer scaling; it is not needed for these rates.
+The design and measurements are in [docs/decisions.md](docs/decisions.md)
+(ADR-083 to ADR-093).
 
 - **GPU renderer**: Mesa for Horizon (nouveau, OpenGL 4.3). The fragment shader
   reproduces the software rasterizer's integer rules and was validated
@@ -77,8 +103,9 @@ Measured on a Switch launched as a Sphaira 4-core forwarder:
 - **Asynchronous graphics**, as on the real RCP: the game thread only snapshots
   RDRAM and keeps running; display-list interpretation, GPU rendering and the
   RDP stores run on other cores before the RDP completion is signalled.
-- **Low clocks**: playable down to 612 MHz CPU / 152 MHz GPU (lower frame
-  rate); 920 MHz CPU / 192 MHz GPU is a stable battery-saving setting.
+- **Low clocks** (measured with v1.3): playable down to 612 MHz CPU / 152 MHz
+  GPU (lower frame rate); 920 MHz CPU / 192 MHz GPU is a stable
+  battery-saving setting.
 - **Voiced briefings** (v1.3): the original N64 briefings are text-only;
   the port plays the PC voice acting from your own (free) StarCraft PC files,
   in English, Italian, Spanish or Portuguese. Missions and transmissions are
@@ -88,18 +115,15 @@ Measured on a Switch launched as a Sphaira 4-core forwarder:
 - Joy-Con / Pro Controller and handheld touch screen (tap to point, drag to
   select, two-finger pan, instant touch cursor)
 - USB keyboard and mouse, PC style: the mouse drives the cursor (left click
-  select, right click order), edge and arrow-key scrolling, F10 menu
-  (docs/input.md)
+  select, right click order, minimap clicks), edge and arrow-key scrolling, the
+  PC command hotkeys, control groups 1-4 and F10 for the menu (docs/input.md)
 
 | Core | Work |
 |---|---|
-| 0 | presentation, VI/timer, graphics thread (display lists, RDP stores) |
-| 1 | the game (StarCraft 64 is single-threaded) and the RDRAM snapshot |
-| 2 | OpenGL thread (texture planning, uploads, readback) |
-| 3 | system; raster helper when a frame falls back to software |
-
-**Next:** HD graphics from the PC version (the N64 sprites are half-size
-copies of the PC ones), translated briefing and interface text.
+| 0 | presentation, VI/timer, graphics thread (display lists, RDP stores), RDRAM snapshot helper (idle time) |
+| 1 | the game (StarCraft 64 is single-threaded) |
+| 2 | OpenGL thread (texture planning, uploads, readback); HD composition and framebuffer scaling with 3 cores |
+| 3 | system; with a 4-core forwarder: HD composition, framebuffer scaling, a raster helper |
 
 ### Controls
 
@@ -113,6 +137,22 @@ copies of the PC ones), translated briefing and interface text.
 | Left stick | Analog stick |
 | Right stick | C buttons |
 | − | Command panel |
+
+Touch: tap to point and select, drag to box-select, two fingers to pan.
+A USB keyboard and mouse work as on PC:
+
+| Keyboard / mouse | Action |
+|---|---|
+| Left click / drag | select, box-select; on the minimap, move the camera |
+| Right click | order (move, attack, gather) |
+| Mouse at the screen edge, arrow keys | scroll the map |
+| Command letters (M, A, S, H, P, G, B, V, ...) | the PC hotkeys: B then B builds a Barracks, M on a Barracks trains a Marine |
+| Ctrl+1-4 / 1-4 | assign / select control group (the N64 has four) |
+| F10 | game menu |
+| Esc | back / cancel |
+
+Outside missions the letters keep their controller bindings (X = A, C = B,
+Enter = Start). Full list: [docs/input.md](docs/input.md).
 
 ---
 
@@ -213,7 +253,9 @@ Use one of the two methods below. Logs (`sc64.log`) and, after a crash, a
 
 A forwarder installs a HOME-menu icon that launches the NRO as a full
 application. Sphaira forwarders can also grant the 4th CPU core, which this
-port uses for an extra raster thread (~10-20% faster menus).
+port uses for the HD composition, the framebuffer scaling and an extra raster
+thread. The frame rates in [Status](#status) are reached with 3 cores too; the
+4th core adds headroom.
 
 1. Install [Sphaira](https://github.com/ITotalJustice/sphaira) and open it.
 2. In its homebrew list select **StarCraft 64** (the icon is the NRO's own).
@@ -229,7 +271,7 @@ forwarder and create it again: a forwarder keeps the icon it was made with.
 ### 7b. hbmenu title takeover
 
 Hold **R** while opening any installed game, then pick StarCraft 64 in hbmenu.
-This uses 3 cores: fully playable, slightly slower menus.
+This uses 3 cores: fully playable, at the frame rates in [Status](#status).
 
 ### 8. Voiced briefings (optional)
 
@@ -356,12 +398,13 @@ rebuilding. A `.txt` extension is fine (`widescreen.txt` works like `widescreen`
 | `novoices` | no voice playback, even when the voice files are installed |
 | `n64music` | the N64 music, even when the PC soundtrack is installed |
 | `nohd` | the N64 mission graphics, even when the PC graphics are installed |
-| `hdverify` | (testing) draws each HD image both natively and with the game's own function and logs any difference |
+| `hdverify` | (testing) draws each HD image both natively and with the game's own function, and each scrolled HD terrain both shifted and in full, and logs any difference |
 | `lockcheats` | keep the original cheat unlocks |
 | `volume` | not empty: one number, the game volume factor (default `4`; `1` = original level) |
 | `softraster` | CPU renderer (v0.5 behaviour), GPU unused |
 | `nogl` | no Mesa at all |
 | `glcheck` | renders every frame on GPU and CPU, logs any difference (slow; for testing) |
+| `syncsnapshot` | copy all of the game's memory at each frame on the game thread (the v1.4 behaviour) instead of mostly in the background |
 
 ## Android APK from Linux/WSL
 
@@ -396,6 +439,17 @@ and Build-Tools 36. See [docs/android.md](docs/android.md) and
 - `tools/switch/` — Docker build, Mesa portlibs import, runtime derivation with
   asserted `__SWITCH__` patches (semaphores, memory, thread cores/priorities,
   early RSP completion, no code mods), `addr2line` helper
+- `native/shell/hd.cpp`, `tools/hd/extract_graphics.py` (v1.5) — HD missions:
+  the PC terrain matched to the N64 map, PC images drawn at twice the
+  resolution by the game's own render functions, and the composition with the
+  N64 frame (fog of war, HUD, translucent boxes); `native/shell/portraits.*` —
+  animated briefing portraits
+- `native/shell/music.*`, `tools/music/extract_music.py` (v1.5) — PC soundtrack
+- `native/shell/input/hotkeys.cpp`, `native/runtime/pc_hotkeys.hpp` (v1.5) — PC
+  keyboard commands and control groups; `native/switch/app.cpp` reads the USB
+  keyboard and mouse and draws the mouse pointer
+- `native/shell/session.cpp` (v1.5) — RDRAM snapshot finished in the background
+  while the game continues, and frame pacing for menus
 - Shared fixes that also help other platforms: word-swapped RDRAM snapshot,
   cross-frame S2DEX background cache, FlashRAM saves on FAT, touch cursor warp
   and faster two-finger camera pan
@@ -412,7 +466,8 @@ and Build-Tools 36. See [docs/android.md](docs/android.md) and
   **gabryboy12-ai**, creator of the original Switch port (v0.5–v1.3) this
   project continues: libnx shell, GPU renderer, asynchronous graphics,
   voiced briefings
-- v1.4 (widescreen, cinematics, in-mission voices and the rest): Thorhax
+- v1.4-v1.5 (widescreen, cinematics, in-mission voices, PC music, HD graphics,
+  keyboard and mouse, 60 fps): Thorhax
 - [StormLib](https://github.com/ladislav-zezula/StormLib) (movie extraction),
   [FFmpeg](https://ffmpeg.org) (movie playback)
 

@@ -167,3 +167,19 @@ python3 tools/renderer/benchmark.py local/inputs/renderer/manifest.json \
 
 Live telemetry adds `software_service_ms` (guest servicing inside `software_ms`)
 and `raster_helpers`.
+
+## Switch v1.5 frame pipeline (2026-11)
+
+The Switch work after Stage 5 is recorded as decisions, each with its
+measurements: ADR-083 (shared snapshot copy, in-order mailbox, VI field queue),
+ADR-084 (background cache by bytes, packed texels), ADR-085 (HD under
+translucent layers), ADR-086 (menus and briefings held at 30 fps), ADR-092
+(NEON framebuffer scaling, HD terrain shifted while scrolling, snapshot
+finished in the background, readback packing removed) and ADR-093 (table
+decode for colour-indexed backgrounds, blocking guest busy waits). Results on
+the Switch (3 cores, stock clocks, widescreen HD): missions 59.4-60 fps,
+scrolling 59.6-60, a 7-minute 1v4 battle 59.9 on average; the game thread uses
+about 2.5 ms per frame; menus and briefings 30 fps. Benchmarks used
+`local/rig/zbench.py` (Zerg base), `zscroll.py` (scrolling), `stress.py`
+(1v4 Hunters) and `menubench.sh`, private scripts driving the console through
+sys-botbase.
