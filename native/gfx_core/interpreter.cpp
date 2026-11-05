@@ -302,11 +302,35 @@ public:
             tex.packed=hit->pixels;
             texture_index=store_known(std::move(tex),hit->key);
         } else {
-            tex.pixels.reserve(width*height);
-            for(unsigned y=0;y<height;++y) {
-                poll();
-                for(unsigned x=0;x<width;++x)
-                    tex.pixels.push_back(source_texel(out.initial_ram,img,x,y,tex.tile.palette,tmem,mode));
+            if(format==2 && mode==2) {
+                // Colour-indexed (scrolled mission canvases miss every frame): the texels
+                // through a table of the palette's packed colours, as source_texel decodes them.
+                std::array<std::uint32_t,256> lut;
+                const unsigned entries=size==0?16:256;
+                for(unsigned v=0;v<entries;++v) {
+                    const auto entry=tmem.palette(size==0?tex.tile.palette*16+v:v);
+                    const Color c=rgba16(entry);
+                    lut[v]=std::uint32_t(c.r)|std::uint32_t(c.g)<<8|std::uint32_t(c.b)<<16|std::uint32_t(c.a)<<24;
+                }
+                auto packed=std::make_shared<std::vector<std::uint32_t>>(std::size_t(width)*height);
+                std::uint32_t* to=packed->data();
+                for(unsigned y=0;y<height;++y) {
+                    poll();
+                    const std::size_t row=std::size_t(y)*width;
+                    if(size==1) for(unsigned x=0;x<width;++x) to[row+x]=lut[source[row+x]];
+                    else for(unsigned x=0;x<width;++x) {
+                        const std::size_t i=row+x;
+                        to[i]=lut[(i&1)?source[i/2]&15:source[i/2]>>4];
+                    }
+                }
+                tex.packed=std::move(packed);
+            } else {
+                tex.pixels.reserve(width*height);
+                for(unsigned y=0;y<height;++y) {
+                    poll();
+                    for(unsigned x=0;x<width;++x)
+                        tex.pixels.push_back(source_texel(out.initial_ram,img,x,y,tex.tile.palette,tmem,mode));
+                }
             }
             texture_index=store(std::move(tex));
             BackgroundCacheEntry entry;

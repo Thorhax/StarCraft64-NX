@@ -2300,3 +2300,17 @@ readback had been running. Renamed, it compiled but cost more than it saved:
 missions gpu+readback+commit 2.2 -> 2.5 ms, menus 4.7 -> 5.7 ms, and its
 undersized buffers corrupted the heap for targets under 34 pixels (a crash in a
 briefing). The packing is removed.
+
+## ADR-093 — Second optimization round (ACCEPTED, user request 2026-11-05)
+
+**1. Colour-indexed backgrounds (kept).** Scrolling changes the mission
+canvas every frame, so its S2DEX background misses the cache and was decoded
+texel by texel through `source_texel` and then repacked: on the desktop decode
+0.51 ms, content key 0.57 ms, cache 0.08 ms per miss; on the Switch the
+interpretation rose from 0.3 to 3.5-4 ms and scrolling across the map edge fell
+to 47-54 tasks/s, the game waiting on DP completion. CI backgrounds with an
+RGBA16 TLUT (mode 2) now decode through a table of the palette's packed
+colours straight into `Texture::packed`. Checked against `source_texel` for
+6540 scrolled backgrounds: identical. The content key keeps its historical
+encoding (test_gfx_core requires it). Switch, the same scroll into fog: 47-54
+-> 59.2-60 tasks/s, interpretation 2-3.3 ms while scrolling.
