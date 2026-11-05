@@ -16,6 +16,25 @@ Their full commit history is kept in this repository. Thank you both.
 > recompiled game code and every game-derived file (icons, movies and voices
 > included) are generated on your machine and are never committed or distributed.
 
+## Quick install
+
+The **installer** builds everything on your own computer with Docker: the Switch
+NRO from your own StarCraft 64 (USA) ROM and, optionally, the PC graphics, music,
+cinematics and voices from your own classic StarCraft install, then writes a
+ready-to-copy `switch/StarCraft64/` folder. One command on Windows (PowerShell),
+macOS or Linux:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\installer\install.ps1 -Rom "StarCraft 64 (USA).z64" -StarCraft "C:\Games\StarCraft"
+```
+
+```bash
+tools/installer/install.sh --rom "StarCraft 64 (USA).z64" --starcraft /path/to/StarCraft
+```
+
+See [docs/installer.md](docs/installer.md). The manual build below does the same
+step by step.
+
 ---
 
 ## What's new in v1.5

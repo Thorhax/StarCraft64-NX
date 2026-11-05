@@ -1,0 +1,15 @@
+# The installer image (tools/installer/Dockerfile) gets only authored source:
+# everything is excluded, then the source folders are allowed back. ROMs, local/
+# (private inputs and game-derived output), third_party/ and Git data never enter it.
+*
+!CMakeLists.txt
+!Makefile
+!LICENSE
+!cmake/
+!native/
+!tools/
+**/*.[zZ]64
+**/*.[vV]64
+**/*.[nN]64
+**/*.[rR][oO][mM]
+**/__pycache__
