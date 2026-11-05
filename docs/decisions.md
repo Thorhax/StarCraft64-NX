@@ -2285,6 +2285,18 @@ snapshot 1.06-1.7 -> 0.21 ms per task, guest CPU about 6.5 -> 5.4 ms per frame.
 Menus keep the synchronous copy. `sdmc:/switch/StarCraft64/syncsnapshot`
 (desktop `--config=sc64.sync_snapshot=1`) restores it everywhere.
 
-**Consequences:** Parts 2 and 4 are verified on the desktop only: the Switch hit
-an Atmosphere fatal error in `am` (0100000000000023) during benchmarking and
-needs a power-button restart before the Switch numbers can be taken.
+**Switch results (2026-11-05, Zerg base, widescreen):** guest snapshot
+1.5-1.75 -> 0.28-0.38 ms per task; guest CPU 9.1-9.5 -> 5.8-7.3 ms per frame
+standing and 10.9 -> 8.9 ms in the 7-minute 1v4 Hunters run (60 tasks/s
+throughout); same build with `syncsnapshot`: 59.6 vs 59.4 tasks/s standing,
+within run-to-run noise. Scrolling across the map edge into fog drops to
+47-54 tasks/s with or without these changes (interpretation rises 0.3 -> 3.5-4
+ms as the background cache misses on every scrolled canvas); with them it is
+50-54 vs 47-54. Menus stay at their 30 fps cap.
+
+**Readback packing reverted.** The Switch log showed the GL pack shader of
+e8d3e6d failing to compile (`packed` is a GLSL reserved word), so the plain
+readback had been running. Renamed, it compiled but cost more than it saved:
+missions gpu+readback+commit 2.2 -> 2.5 ms, menus 4.7 -> 5.7 ms, and its
+undersized buffers corrupted the heap for targets under 34 pixels (a crash in a
+briefing). The packing is removed.
