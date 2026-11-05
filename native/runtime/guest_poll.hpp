@@ -24,6 +24,15 @@ inline void busy_wait_boundary(std::uint8_t* rdram) {
     guest_boundary(rdram, 0);
     std::this_thread::yield();
 }
+// The same loops in the shell, without spinning (ADR-093): the polled state changes
+// only after an external message (the VI interrupt) wakes the guest thread that
+// writes it, so wait up to 1 ms for one instead of returning at once. Runnable
+// guest threads are scheduled before the wait as after it.
+inline void blocking_wait_boundary(std::uint8_t* rdram) {
+    if (exited.load()) throw ultramodern::thread_terminated{};
+    ultramodern::check_running_queue(rdram);
+    guest_boundary(rdram, 1);
+}
 // D-024: busy polling must observe the real two-entry guest AI FIFO.
 // It also provides an interrupt/scheduling boundary while the CPU waits.
 template<class Status>

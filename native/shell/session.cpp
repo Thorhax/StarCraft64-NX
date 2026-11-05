@@ -611,7 +611,7 @@ extern "C" void sc64_idle_poll(std::uint8_t* rdram) {
 }
 extern "C" void sc64_guest_poll(std::uint8_t* rdram) {
     sc64_pause_point();
-    sc64::runtime::busy_wait_boundary(rdram);
+    sc64::runtime::blocking_wait_boundary(rdram);
 }
 extern "C" std::uint32_t sc64_ai_status(std::uint8_t* rdram) {
     sc64_pause_point();

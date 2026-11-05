@@ -2314,3 +2314,24 @@ colours straight into `Texture::packed`. Checked against `source_texel` for
 6540 scrolled backgrounds: identical. The content key keeps its historical
 encoding (test_gfx_core requires it). Switch, the same scroll into fog: 47-54
 -> 59.2-60 tasks/s, interpretation 2-3.3 ms while scrolling.
+
+**2. HD composition (measured; nothing kept).** A line-level gprof profile of
+`compose` spreads its time over every per-pixel stage (the largest, the clear
+HD write in pass 3, about 13%). Writing the common clear pixels in a separate
+branch-free pass was slower on the desktop (pass 3 1.4-1.7 -> 1.8 ms), and
+`-mcpu=cortex-a57` for `hd.cpp` did not change the Switch's compose CPU (6.08
+vs 6.11 ms). Its main step is a 256-entry palette lookup per HD pixel, which
+NEON table lookups cannot cover; composition runs on its worker, off the game
+thread.
+
+**3. Busy waits (kept).** The game's memory-wait loops (D-025: VI framebuffer
+and VI worker state) called `busy_wait_boundary` about 3500 times per frame on
+the Switch, about 3.1 ms of each frame, each a zero-timeout message poll and a
+yield. The polled state changes only after an external message wakes the guest
+thread that writes it, so the shell's hook (`blocking_wait_boundary`) schedules
+runnable guest threads, then waits up to 1 ms for a message. Switch, Zerg base:
+guest CPU 7.5-8.2 -> 2.5 ms per frame, 7 waits per frame, 59.8 tasks/s;
+scrolling into fog 59.6-60.1; 7-minute 1v4 Hunters 59.88 average (minimum
+59.4) with guest CPU 2.5 ms (was 8.9-10.9); menus at their 30 fps cap; audio
+underruns and dropped frames unchanged (1 at start, 0). The capture host keeps
+the original polling.
